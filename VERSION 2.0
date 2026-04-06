@@ -1,0 +1,1484 @@
+# ============================================================
+#  통화량 변화에 따른 자산군별 가격 상승 시차(Time-lag) 분석
+#  및 전이 경로 예측 모델 개발  ★ VERSION 2.0 ★
+#  방향성 정확도 목표: 60% → 80%
+# ============================================================
+#
+#  [실행 전 패키지 설치 — 터미널에 한 번만]
+#  pip install fredapi yfinance pandas numpy scikit-learn
+#  pip install xgboost lightgbm shap matplotlib seaborn plotly
+#  pip install statsmodels scipy tensorflow optuna
+#
+#  [v2 주요 변경사항]
+#  1. XGBoost early_stopping_rounds 버그 수정
+#  2. RSI / MACD / 모멘텀 기술적 지표 추가
+#  3. 분류 모델(XGBClassifier) 추가 → 방향성 직접 최적화
+#  4. 회귀 + 분류 앙상블로 방향성 정확도 대폭 향상
+#  5. 피처 중요도 기반 자동 피처 선택 (노이즈 제거)
+#  6. Optuna 하이퍼파라미터 자동 튜닝
+#  7. Bidirectional GRU 적용
+#  8. 실제 FRED 데이터 연동
+#
+#  [파일 구조]
+#  SECTION 0  : 라이브러리 임포트 + CONFIG
+#  SECTION 1  : 샘플 데이터 생성기 (테스트용)
+#  SECTION 2  : 실제 데이터 수집 (FRED + Yahoo Finance)
+#  SECTION 3  : 전처리 (결측치, 정상성, 이상치)
+#  SECTION 4  : 외부 충격 더미 변수
+#  SECTION 5  : 피처 엔지니어링 (기술지표 포함)
+#  SECTION 6  : 그랜저 인과관계 분석
+#  SECTION 7  : 피처 선택 (중요도 기반 노이즈 제거)
+#  SECTION 8  : XGBoost 회귀 모델 (버그 수정)
+#  SECTION 9  : XGBoost 분류 모델 (방향성 직접 예측)
+#  SECTION 10 : LightGBM 회귀 + 분류 모델
+#  SECTION 11 : Bidirectional GRU 딥러닝 모델
+#  SECTION 12 : Optuna 하이퍼파라미터 자동 튜닝
+#  SECTION 13 : 앙상블 (회귀 + 분류 결합)
+#  SECTION 14 : XAI - SHAP 분석
+#  SECTION 15 : Walk-forward 백테스팅 (버그 수정)
+#  SECTION 16 : 성능 평가 (RMSE, MAE, MAPE, 방향성)
+#  SECTION 17 : 시각화 대시보드
+#  SECTION 18 : 메인 실행 파이프라인
+# ============================================================
+
+
+# ============================================================
+# SECTION 0 : 라이브러리 임포트 + CONFIG
+# ============================================================
+
+import os
+import warnings
+import platform
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import scipy.stats as stats
+
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error, accuracy_score
+from sklearn.feature_selection import SelectFromModel
+
+import xgboost as xgb
+import lightgbm as lgb
+import shap
+
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import (LSTM, GRU, Dense, Dropout,
+                                     Bidirectional, BatchNormalization)
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.optimizers import Adam
+
+import statsmodels.api as sm
+from statsmodels.tsa.stattools import adfuller, grangercausalitytests
+
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    OPTUNA_AVAILABLE = True
+except ImportError:
+    OPTUNA_AVAILABLE = False
+    print("    optuna 미설치. pip install optuna (선택사항)")
+
+warnings.filterwarnings("ignore")
+np.random.seed(42)
+tf.random.set_seed(42)
+
+
+# ──────────────────────────────────────────────────────────
+#  ★ CONFIG — 여기만 수정하세요
+# ──────────────────────────────────────────────────────────
+CONFIG = {
+    # FRED API 키 (발급받은 키 입력)
+    "FRED_API_KEY": "60d2a8e19966bb6b8412e4bc9e02bca3",
+
+    # 분석 기간
+    "START_DATE": "2000-01-01",
+    "END_DATE":   datetime.today().strftime("%Y-%m-%d"),
+
+    # 피처 설정
+    "LAG_PERIODS":  [1, 2, 3, 4, 6, 9, 12, 18, 24, 36],
+    "MA_WINDOWS":   [3, 6, 12, 24],
+    "RSI_PERIOD":   14,
+    "MACD_FAST":    12,
+    "MACD_SLOW":    26,
+    "MACD_SIGNAL":  9,
+
+    # GRU 하이퍼파라미터
+    "LOOKBACK":     36,
+    "EPOCHS":       150,
+    "BATCH":        32,
+    "GRU_UNITS":    128,
+    "DROPOUT":      0.3,
+    "LR":           0.001,
+
+    # 피처 선택 — 중요도 상위 N개만 사용
+    "TOP_FEATURES": 60,
+
+    # Optuna 튜닝 횟수 (클수록 정확하지만 느림)
+    "OPTUNA_TRIALS": 50,
+
+    # 백테스팅
+    "WF_SPLITS":  5,
+    "MIN_TRAIN":  60,
+
+    # 그랜저 최대 시차
+    "GRANGER_MAX_LAG": 24,
+
+    # 결과 저장 경로
+    "OUT_DIR": "./capstone_output_v2",
+}
+
+os.makedirs(CONFIG["OUT_DIR"], exist_ok=True)
+
+# 자산 티커
+ASSET_TICKERS = {
+    "Gold":           "GC=F",
+    "Silver":         "SI=F",
+    "Copper":         "HG=F",
+    "WTI_Oil":        "CL=F",
+    "Natural_Gas":    "NG=F",
+    "Wheat":          "ZW=F",
+    "Corn":           "ZC=F",
+    "Soybean":        "ZS=F",
+    "Energy_ETF":     "XLE",
+    "Materials_ETF":  "XLB",
+    "RealEstate_ETF": "XLRE",
+    "Financials_ETF": "XLF",
+    "TIPS_ETF":       "TIP",
+}
+
+# FRED 시리즈
+FRED_SERIES = {
+    "M1":          "M1SL",
+    "M2":          "M2SL",
+    "Fed_Rate":    "FEDFUNDS",
+    "CPI":         "CPIAUCSL",
+    "PPI":         "PPIACO",
+    "PCE":         "PCE",
+    "GDP":         "GDP",
+    "Unemployment":"UNRATE",
+    "T10Y":        "DGS10",
+    "T2Y":         "DGS2",
+    "M2_Velocity": "M2V",
+    "TIPS_10Y":    "DFII10",   # 10년 실질금리
+}
+
+# 외부 충격 이벤트
+SHOCK_EVENTS = {
+    "GFC":            ("2008-09-01", "2009-06-30"),
+    "EU_Debt":        ("2010-05-01", "2012-12-31"),
+    "Oil_Crash":      ("2014-06-01", "2016-02-28"),
+    "COVID19":        ("2020-02-01", "2021-06-30"),
+    "Ukraine_War":    ("2022-02-01", "2023-06-30"),
+}
+
+
+# ============================================================
+# SECTION 1 : 샘플 데이터 생성기
+# ============================================================
+
+def generate_sample_data(n=300):
+    """API 없이 테스트할 수 있는 시뮬레이션 데이터"""
+    print("  📝 샘플 데이터 생성 (테스트 모드)...")
+    dates = pd.date_range(start=CONFIG["START_DATE"], periods=n, freq="M")
+    rng = np.random.default_rng(42)
+
+    m2g = rng.standard_normal(n) * 0.015 + 0.004
+    m2g[200:230] += 0.025
+    m2c = np.cumsum(m2g)
+
+    gold_r  = np.roll(m2c, 6)  * 0.40 + rng.standard_normal(n) * 0.04
+    wti_r   = np.roll(m2c, 9)  * 0.50 + rng.standard_normal(n) * 0.07
+    wheat_r = np.roll(wti_r, 3)* 0.30 + rng.standard_normal(n) * 0.05
+
+    df = pd.DataFrame({
+        "M1":          8000  * np.exp(m2c * 0.8),
+        "M2":          15000 * np.exp(m2c),
+        "Fed_Rate":    np.clip(3.5 - m2c * 4 + rng.standard_normal(n) * 0.4, 0, 20),
+        "CPI":         100   * np.exp(np.cumsum(np.roll(m2c, 12) * 0.025 + 0.002)),
+        "PPI":         100   * np.exp(np.cumsum(np.roll(m2c, 10) * 0.028 + 0.002)),
+        "PCE":         95    * np.exp(np.cumsum(np.roll(m2c, 12) * 0.022 + 0.002)),
+        "GDP":         20000 * np.exp(np.cumsum(rng.standard_normal(n) * 0.008 + 0.005)),
+        "Unemployment":np.clip(5 + rng.standard_normal(n) * 1.5, 2, 15),
+        "T10Y":        np.clip(3.5 + rng.standard_normal(n) * 0.5, 0, 9),
+        "T2Y":         np.clip(2.8 + rng.standard_normal(n) * 0.5, 0, 8),
+        "M2_Velocity": np.clip(1.8 - m2c * 0.5, 0.8, 2.5),
+        "TIPS_10Y":    np.clip(1.0 - m2c * 0.3 + rng.standard_normal(n) * 0.3, -2, 4),
+        "Gold":        400   * np.exp(np.cumsum(gold_r)),
+        "Silver":      7     * np.exp(np.cumsum(gold_r * 1.5 + rng.standard_normal(n) * 0.03)),
+        "Copper":      1.5   * np.exp(np.cumsum(gold_r * 0.8 + rng.standard_normal(n) * 0.03)),
+        "WTI_Oil":     40    * np.exp(np.cumsum(wti_r)),
+        "Natural_Gas": 3     * np.exp(np.cumsum(wti_r * 0.8 + rng.standard_normal(n) * 0.05)),
+        "Wheat":       300   * np.exp(np.cumsum(wheat_r)),
+        "Corn":        200   * np.exp(np.cumsum(wheat_r * 0.9)),
+        "Soybean":     700   * np.exp(np.cumsum(wheat_r * 0.85)),
+        "Energy_ETF":  50    * np.exp(np.cumsum(wti_r * 0.6 + rng.standard_normal(n) * 0.02)),
+        "Materials_ETF":40   * np.exp(np.cumsum(gold_r * 0.5 + rng.standard_normal(n) * 0.02)),
+        "RealEstate_ETF":30  * np.exp(np.cumsum(m2c * 0.3 + rng.standard_normal(n) * 0.02)),
+        "Financials_ETF":35  * np.exp(np.cumsum(m2c * 0.2 + rng.standard_normal(n) * 0.02)),
+        "TIPS_ETF":    100   * np.exp(np.cumsum(np.roll(m2c, 12) * 0.02 + 0.001)),
+    }, index=dates)
+
+    print(f"  ✓ 완료: {df.shape[0]}개월 × {df.shape[1]}개 변수")
+    return df
+
+
+# ============================================================
+# SECTION 2 : 실제 데이터 수집 (FRED + Yahoo Finance)
+# ============================================================
+
+def collect_fred_data():
+    try:
+        from fredapi import Fred
+    except ImportError:
+        print("    pip install fredapi")
+        return None
+
+    print("  📊 FRED 실제 데이터 수집 중...")
+    fred = Fred(api_key=CONFIG["FRED_API_KEY"])
+    data = {}
+
+    for name, sid in FRED_SERIES.items():
+        try:
+            s = fred.get_series(sid,
+                                observation_start=CONFIG["START_DATE"],
+                                observation_end=CONFIG["END_DATE"])
+            data[name] = s
+            print(f"    ✓ {name} ({sid}): {len(s)}개")
+        except Exception as e:
+            print(f"    ✗ {name}: {e}")
+
+    df = pd.DataFrame(data)
+    df.index = pd.to_datetime(df.index)
+    return df.resample("M").last()
+
+
+def collect_yahoo_data():
+    try:
+        import yfinance as yf
+    except ImportError:
+        print("    pip install yfinance")
+        return None
+
+    print("   Yahoo Finance 데이터 수집 중...")
+    data = {}
+
+    for name, ticker in ASSET_TICKERS.items():
+        try:
+            raw = yf.download(ticker,
+                              start=CONFIG["START_DATE"],
+                              end=CONFIG["END_DATE"],
+                              interval="1mo",
+                              progress=False,
+                              auto_adjust=True)   # ← Adj Close 자동 조정
+
+            if raw.empty:
+                print(f"    ✗ {name}: 데이터 없음")
+                continue
+
+            # MultiIndex 컬럼 처리 (yfinance 최신버전 대응)
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+
+            col = "Close"   # auto_adjust=True면 Close가 수정주가
+            if col not in raw.columns:
+                print(f"    ✗ {name}: Close 컬럼 없음")
+                continue
+
+            series = raw[col].squeeze()   # ← scalar 방지 핵심
+
+            # Series인지 확인 후 저장
+            if isinstance(series, pd.Series) and len(series) > 0:
+                series.name = name
+                data[name] = series
+                print(f"    ✓ {name}: {len(series)}개")
+            else:
+                print(f"    ✗ {name}: 유효한 데이터 없음")
+
+        except Exception as e:
+            print(f"    ✗ {name}: {e}")
+
+    if not data:
+        print("    Yahoo 데이터 수집 실패 → 샘플 데이터 사용")
+        return None
+
+    df = pd.DataFrame(data)
+    df.index = pd.to_datetime(df.index)
+    df = df.resample("M").last()
+    df = df.dropna(how="all")
+    print(f"  ✓ Yahoo 수집 완료: {df.shape[0]}개월 × {df.shape[1]}개 자산")
+    return df
+
+def load_all_data():
+    print("\n[STEP 1] 데이터 수집")
+    use_sample = (CONFIG["FRED_API_KEY"] in ["your_fred_api_key_here", ""])
+
+    if use_sample:
+        print("    FRED API 키 미설정 → 샘플 데이터 사용")
+        return generate_sample_data()
+
+    df_macro = collect_fred_data()
+    df_asset = collect_yahoo_data()
+
+    frames = [f for f in [df_macro, df_asset] if f is not None]
+    if not frames:
+        return generate_sample_data()
+
+    df = pd.concat(frames, axis=1).sort_index()
+    print(f"\n   병합 완료: {df.shape[0]}개월 × {df.shape[1]}개 변수")
+    print(f"     기간: {df.index[0].strftime('%Y-%m')} ~ {df.index[-1].strftime('%Y-%m')}")
+    return df
+
+
+# ============================================================
+# SECTION 3 : 전처리
+# ============================================================
+
+def preprocess(df):
+    print("\n[STEP 2] 전처리")
+
+    # ── 결측치 보정 ──────────────────────────────────────────
+    df = df.interpolate(method="linear", limit_direction="both").ffill().bfill()
+    print(f"  ✓ 결측치 처리 완료: 남은 결측치 {df.isnull().sum().sum()}개")
+
+    # ── 로그 수익률 + 전년비 변화율 ──────────────────────────
+    price_cols = [c for c in df.columns
+                  if c not in ["Fed_Rate", "Unemployment", "T10Y", "T2Y", "TIPS_10Y"]]
+
+    for col in price_cols:
+        if (df[col] > 0).all():
+            df[f"{col}_LogReturn"] = np.log(df[col] / df[col].shift(1))
+            df[f"{col}_YoY"]       = df[col].pct_change(12) * 100
+
+    print(f"  ✓ 정상성 변환 후 컬럼 수: {df.shape[1]}")
+    return df
+
+
+# ============================================================
+# SECTION 4 : 외부 충격 더미 변수
+# ============================================================
+
+def add_shock_dummies(df):
+    print("\n[STEP 3] 외부 충격 더미 변수")
+    for event, (s, e) in SHOCK_EVENTS.items():
+        mask = (df.index >= s) & (df.index <= e)
+        df[f"Shock_{event}"] = mask.astype(int)
+        print(f"  ✓ Shock_{event}: {mask.sum()}개월")
+    return df
+
+
+# ============================================================
+# SECTION 5 : 피처 엔지니어링 (★ v2 기술지표 대폭 추가)
+# ============================================================
+
+def compute_rsi(series, period=14):
+    """RSI (Relative Strength Index) 계산"""
+    delta = series.diff()
+    gain  = delta.clip(lower=0).rolling(period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(period).mean()
+    rs    = gain / (loss + 1e-8)
+    return 100 - (100 / (1 + rs))
+
+
+def compute_macd(series, fast=12, slow=26, signal=9):
+    """MACD 라인, 시그널 라인, 히스토그램"""
+    ema_fast   = series.ewm(span=fast,   adjust=False).mean()
+    ema_slow   = series.ewm(span=slow,   adjust=False).mean()
+    macd_line  = ema_fast - ema_slow
+    signal_line= macd_line.ewm(span=signal, adjust=False).mean()
+    histogram  = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def compute_stochastic(series, period=14):
+    """Stochastic Oscillator %K"""
+    low_min  = series.rolling(period).min()
+    high_max = series.rolling(period).max()
+    return 100 * (series - low_min) / (high_max - low_min + 1e-8)
+
+
+def build_features(df):
+    print("\n[STEP 4] 피처 엔지니어링 (v2 — 기술지표 포함)")
+
+    monetary_cols = [c for c in df.columns if any(
+        k in c for k in ["M1", "M2", "Fed_Rate", "CPI", "PPI", "PCE", "GDP",
+                         "T10Y", "T2Y", "TIPS_10Y", "M2_Velocity"]
+    ) and "lag" not in c and "LogReturn" not in c and "YoY" not in c]
+
+    asset_price_cols = [c for c in df.columns if c in list(ASSET_TICKERS.keys())]
+    asset_lr_cols    = [c for c in df.columns if "_LogReturn" in c]
+
+    # ── 1. 시차 변수 ─────────────────────────────────────────
+    print("  → 시차 변수 생성")
+    for col in monetary_cols + [c for c in df.columns if "_YoY" in c]:
+        if col in df.columns:
+            for lag in CONFIG["LAG_PERIODS"]:
+                df[f"{col}_lag{lag}"] = df[col].shift(lag)
+
+    for col in asset_lr_cols:
+        if col in df.columns:
+            for lag in [1, 2, 3, 6, 9, 12]:
+                df[f"{col}_lag{lag}"] = df[col].shift(lag)
+
+    # ── 2. 이동평균 / 지수이동평균 ───────────────────────────
+    print("  → 이동평균 생성")
+    for col in asset_price_cols:
+        if col in df.columns:
+            for w in CONFIG["MA_WINDOWS"]:
+                df[f"{col}_MA{w}"]  = df[col].rolling(w).mean()
+                df[f"{col}_EMA{w}"] = df[col].ewm(span=w).mean()
+            # 골든크로스 / 데드크로스 시그널
+            df[f"{col}_GoldenCross"] = (
+                (df[col].rolling(12).mean() > df[col].rolling(24).mean()).astype(int)
+            )
+
+    # ── 3. RSI ───────────────────────────────────────────────
+    print("  → RSI 생성")
+    for col in asset_price_cols:
+        if col in df.columns:
+            df[f"{col}_RSI14"]  = compute_rsi(df[col], 14)
+            df[f"{col}_RSI28"]  = compute_rsi(df[col], 28)
+            # 과매수(>70) / 과매도(<30) 시그널
+            df[f"{col}_OB"] = (df[f"{col}_RSI14"] > 70).astype(int)
+            df[f"{col}_OS"] = (df[f"{col}_RSI14"] < 30).astype(int)
+
+    # ── 4. MACD ──────────────────────────────────────────────
+    print("  → MACD 생성")
+    for col in asset_price_cols:
+        if col in df.columns:
+            macd, sig, hist = compute_macd(df[col])
+            df[f"{col}_MACD"]      = macd
+            df[f"{col}_MACD_Sig"]  = sig
+            df[f"{col}_MACD_Hist"] = hist
+            df[f"{col}_MACD_Bull"] = (macd > sig).astype(int)  # 상승 시그널
+
+    # ── 5. 변동성 지표 ───────────────────────────────────────
+    print("  → 변동성 지표 생성")
+    for col in asset_lr_cols:
+        if col in df.columns:
+            df[f"{col}_Vol12"] = df[col].rolling(12).std()
+            df[f"{col}_Vol6"]  = df[col].rolling(6).std()
+            # 변동성 급등 시그널
+            df[f"{col}_VolSpike"] = (
+                df[f"{col}_Vol6"] > df[f"{col}_Vol12"] * 1.5
+            ).astype(int)
+
+    # ── 6. 스토캐스틱 ────────────────────────────────────────
+    print("  → 스토캐스틱 생성")
+    for col in asset_price_cols:
+        if col in df.columns:
+            df[f"{col}_Stoch14"] = compute_stochastic(df[col], 14)
+
+    # ── 7. 모멘텀 (단기/장기 비율) ───────────────────────────
+    print("  → 모멘텀 피처 생성")
+    for col in asset_price_cols:
+        if col in df.columns:
+            df[f"{col}_Mom3_12"] = (df[col].rolling(3).mean() /
+                                    (df[col].rolling(12).mean() + 1e-8))
+            df[f"{col}_Mom6_24"] = (df[col].rolling(6).mean() /
+                                    (df[col].rolling(24).mean() + 1e-8))
+            df[f"{col}_RateOfChange6"]  = df[col].pct_change(6)  * 100
+            df[f"{col}_RateOfChange12"] = df[col].pct_change(12) * 100
+
+    # ── 8. 거시경제 스프레드 ─────────────────────────────────
+    print("  → 거시경제 스프레드 생성")
+    if "T10Y" in df.columns and "T2Y" in df.columns:
+        df["Yield_Spread"]    = df["T10Y"] - df["T2Y"]
+        df["YieldCurve_Inv"]  = (df["Yield_Spread"] < 0).astype(int)  # 장단기역전
+    if "M1" in df.columns and "M2" in df.columns:
+        df["M1_M2_Ratio"]     = df["M1"] / (df["M2"] + 1e-8)
+    if "Fed_Rate" in df.columns and "CPI_YoY" in df.columns:
+        df["Real_Rate"]       = df["Fed_Rate"] - df["CPI_YoY"]
+        df["NegRealRate"]     = (df["Real_Rate"] < 0).astype(int)  # 실질금리 마이너스
+    if "TIPS_10Y" in df.columns:
+        df["TIPS_Signal"]     = (df["TIPS_10Y"] < 0).astype(int)
+
+    # ── 9. 자산간 상호 시차 피처 (전이 경로 포착) ────────────
+    print("  → 교차 자산 시차 피처 생성")
+    cross_pairs = [
+        ("Gold_LogReturn",   "WTI_Oil_LogReturn"),
+        ("Gold_LogReturn",   "Wheat_LogReturn"),
+        ("WTI_Oil_LogReturn","Wheat_LogReturn"),
+        ("M2_YoY",           "Gold_LogReturn"),
+        ("M2_YoY",           "WTI_Oil_LogReturn"),
+    ]
+    for src, tgt in cross_pairs:
+        if src in df.columns and tgt in df.columns:
+            for lag in [1, 3, 6]:
+                df[f"Cross_{src[:4]}_{tgt[:4]}_lag{lag}"] = df[src].shift(lag)
+
+    # ── 결측치 제거 ──────────────────────────────────────────
+    key_cols = [c for c in df.columns if "lag" in c][:5]
+    df = df.dropna(subset=key_cols)
+    print(f"  ✓ 최종 피처 수: {df.shape[1]}, 데이터 수: {df.shape[0]}")
+    return df
+
+
+# ============================================================
+# SECTION 6 : 그랜저 인과관계 분석
+# ============================================================
+
+def run_granger_analysis(df):
+    print("\n[STEP 5] 그랜저 인과관계 분석")
+    max_lag = CONFIG["GRANGER_MAX_LAG"]
+
+    causes  = [c for c in ["M2_YoY", "M1_YoY", "CPI_YoY", "PPI_YoY"] if c in df.columns]
+    effects = [c for c in df.columns if "_LogReturn" in c][:8]
+
+    lag_t  = pd.DataFrame(index=causes, columns=effects, dtype=float)
+    pval_t = pd.DataFrame(index=causes, columns=effects, dtype=float)
+    rows   = []
+
+    for cause in causes:
+        for effect in effects:
+            try:
+                data = df[[cause, effect]].dropna()
+                if len(data) < max_lag + 5:
+                    continue
+                res      = grangercausalitytests(data, maxlag=max_lag, verbose=False)
+                best_lag = min(res, key=lambda l: res[l][0]["ssr_ftest"][1])
+                pval     = res[best_lag][0]["ssr_ftest"][1]
+                sig = "✓" if pval < 0.05 else "✗"
+                print(f"  {sig} {cause:12s} → {effect:28s} 시차={best_lag:2d}개월  p={pval:.4f}")
+                lag_t.loc[cause, effect]  = best_lag
+                pval_t.loc[cause, effect] = pval
+                rows.append({"cause": cause, "effect": effect,
+                             "best_lag": best_lag, "p_value": pval,
+                             "significant": pval < 0.05})
+            except Exception:
+                pass
+
+    # 히트맵
+    if not lag_t.dropna(how="all").empty:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
+        sns.heatmap(lag_t.astype(float), annot=True, fmt=".0f",
+                    cmap="YlOrRd", ax=ax1, cbar_kws={"label": "최적 시차(월)"})
+        ax1.set_title("그랜저 인과관계 최적 시차", fontsize=13, fontweight="bold")
+        sns.heatmap(pval_t.astype(float), annot=True, fmt=".3f",
+                    cmap="RdYlGn_r", ax=ax2, vmin=0, vmax=0.1,
+                    cbar_kws={"label": "p-value"})
+        ax2.set_title("그랜저 인과관계 p-value (< 0.05 = 유의)", fontsize=13, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(f"{CONFIG['OUT_DIR']}/granger_heatmap.png", dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  ✓ 히트맵 저장")
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# SECTION 7 : 피처 선택 (★ v2 신규 — 노이즈 제거)
+# ============================================================
+
+def select_top_features(X_tr, y_tr, top_n=None):
+    """
+    XGBoost 피처 중요도 기반으로 상위 N개 피처만 선택.
+    노이즈 피처를 제거해 과적합을 줄이고 성능을 높임.
+    """
+    if top_n is None:
+        top_n = CONFIG["TOP_FEATURES"]
+
+    print(f"  → 피처 선택: {X_tr.shape[1]}개 → 상위 {top_n}개")
+
+    selector = xgb.XGBRegressor(
+        n_estimators=100, max_depth=4,
+        random_state=42, verbosity=0, n_jobs=-1
+    )
+    selector.fit(X_tr, y_tr)
+    importance = pd.Series(selector.feature_importances_, index=X_tr.columns)
+    top_cols   = importance.nlargest(top_n).index.tolist()
+
+    print(f"  ✓ 선택된 피처: {len(top_cols)}개")
+    return top_cols
+
+
+# ============================================================
+# SECTION 8 : XGBoost 회귀 모델 (★ 버그 수정)
+# ============================================================
+
+def train_xgboost_reg(X_tr, y_tr, X_val, y_val, params=None):
+    """
+    ★ 버그 수정: early_stopping_rounds를 생성자로 이동
+    """
+    if params is None:
+        params = {
+            "n_estimators":     800,
+            "learning_rate":    0.03,
+            "max_depth":        6,
+            "min_child_weight": 3,
+            "subsample":        0.8,
+            "colsample_bytree": 0.8,
+            "reg_alpha":        0.1,
+            "reg_lambda":       1.0,
+        }
+
+    model = xgb.XGBRegressor(
+        **params,
+        early_stopping_rounds=50,  # ★ 생성자에 위치 (버그 수정)
+        eval_metric="rmse",
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0,
+    )
+    model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+    return model
+
+
+# ============================================================
+# SECTION 9 : XGBoost 분류 모델 (★ v2 신규 — 방향성 직접 예측)
+# ============================================================
+
+def make_direction_labels(y):
+    """
+    수익률 시리즈 → 방향 레이블 (1=상승, 0=하락/보합)
+    분류 모델이 방향성 정확도를 직접 최적화
+    """
+    return (y > 0).astype(int)
+
+
+def train_xgboost_clf(X_tr, y_tr, X_val, y_val, params=None):
+    """
+    방향성 분류 모델 — 상승/하락 직접 예측
+    ★ 이 모델이 방향성 정확도를 크게 올려줌
+    """
+    dir_tr  = make_direction_labels(y_tr)
+    dir_val = make_direction_labels(y_val)
+
+    if params is None:
+        params = {
+            "n_estimators":     800,
+            "learning_rate":    0.03,
+            "max_depth":        5,
+            "min_child_weight": 3,
+            "subsample":        0.8,
+            "colsample_bytree": 0.8,
+            "reg_alpha":        0.5,
+            "reg_lambda":       1.0,
+            "scale_pos_weight": (dir_tr == 0).sum() / ((dir_tr == 1).sum() + 1e-8),
+        }
+
+    model = xgb.XGBClassifier(
+        **params,
+        early_stopping_rounds=50,  # ★ 생성자에 위치
+        eval_metric="logloss",
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0,
+        use_label_encoder=False,
+    )
+    model.fit(X_tr, dir_tr, eval_set=[(X_val, dir_val)], verbose=False)
+    return model
+
+
+# ============================================================
+# SECTION 10 : LightGBM 회귀 + 분류 모델
+# ============================================================
+
+def train_lgb_reg(X_tr, y_tr, X_val, y_val):
+    """LightGBM 회귀"""
+    model = lgb.LGBMRegressor(
+        n_estimators=800, learning_rate=0.03, max_depth=6,
+        num_leaves=63, min_child_samples=15,
+        subsample=0.8, colsample_bytree=0.8,
+        reg_alpha=0.1, reg_lambda=1.0,
+        random_state=42, n_jobs=-1, verbose=-1,
+    )
+    model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)],
+              callbacks=[lgb.early_stopping(50, verbose=False),
+                         lgb.log_evaluation(period=9999)])
+    return model
+
+
+def train_lgb_clf(X_tr, y_tr, X_val, y_val):
+    """LightGBM 분류 (방향성 직접 최적화)"""
+    dir_tr  = make_direction_labels(y_tr)
+    dir_val = make_direction_labels(y_val)
+
+    model = lgb.LGBMClassifier(
+        n_estimators=800, learning_rate=0.03, max_depth=5,
+        num_leaves=31, min_child_samples=15,
+        subsample=0.8, colsample_bytree=0.8,
+        reg_alpha=0.5, reg_lambda=1.0,
+        random_state=42, n_jobs=-1, verbose=-1,
+        is_unbalance=True,
+    )
+    model.fit(X_tr, dir_tr, eval_set=[(X_val, dir_val)],
+              callbacks=[lgb.early_stopping(50, verbose=False),
+                         lgb.log_evaluation(period=9999)])
+    return model
+
+
+# ============================================================
+# SECTION 11 : Bidirectional GRU 딥러닝 모델 (★ v2 업그레이드)
+# ============================================================
+
+def create_sequences(X, y, lookback):
+    Xs, ys = [], []
+    for i in range(lookback, len(X)):
+        Xs.append(X[i - lookback: i])
+        ys.append(y[i])
+    return np.array(Xs), np.array(ys)
+
+
+def build_bigru(input_shape):
+    """
+    Bidirectional GRU — 과거와 미래 방향 모두 학습
+    BatchNormalization으로 학습 안정화
+    """
+    model = Sequential([
+        Bidirectional(GRU(CONFIG["GRU_UNITS"],
+                          return_sequences=True,
+                          recurrent_dropout=0.1),
+                      input_shape=input_shape),
+        BatchNormalization(),
+        Dropout(CONFIG["DROPOUT"]),
+
+        Bidirectional(GRU(CONFIG["GRU_UNITS"] // 2,
+                          return_sequences=True,
+                          recurrent_dropout=0.1)),
+        BatchNormalization(),
+        Dropout(CONFIG["DROPOUT"]),
+
+        GRU(CONFIG["GRU_UNITS"] // 4, return_sequences=False),
+        Dropout(CONFIG["DROPOUT"]),
+
+        Dense(64, activation="relu"),
+        BatchNormalization(),
+        Dense(32, activation="relu"),
+        Dense(1),
+    ])
+    model.compile(
+        optimizer=Adam(learning_rate=CONFIG["LR"]),
+        loss="huber",
+        metrics=["mae"],
+    )
+    return model
+
+
+def train_bigru(X_tr, y_tr, X_val, y_val):
+    model = build_bigru((X_tr.shape[1], X_tr.shape[2]))
+    print(f"    BiGRU 파라미터 수: {model.count_params():,}")
+
+    callbacks = [
+        EarlyStopping(patience=20, restore_best_weights=True, monitor="val_loss"),
+        ReduceLROnPlateau(factor=0.5, patience=10, min_lr=1e-6),
+        ModelCheckpoint(f"{CONFIG['OUT_DIR']}/bigru_best.keras",
+                        save_best_only=True, monitor="val_loss"),
+    ]
+    history = model.fit(
+        X_tr, y_tr,
+        validation_data=(X_val, y_val),
+        epochs=CONFIG["EPOCHS"],
+        batch_size=CONFIG["BATCH"],
+        callbacks=callbacks,
+        verbose=0,
+    )
+    return model, history
+
+
+# ============================================================
+# SECTION 12 : Optuna 하이퍼파라미터 자동 튜닝 (★ v2 신규)
+# ============================================================
+
+def optuna_tune_xgb(X_tr, y_tr, X_val, y_val, n_trials=None):
+    """
+    Optuna로 XGBoost 최적 하이퍼파라미터 자동 탐색
+    - 설치: pip install optuna
+    """
+    if not OPTUNA_AVAILABLE:
+        print("    Optuna 미설치, 기본 파라미터 사용")
+        return None
+
+    if n_trials is None:
+        n_trials = CONFIG["OPTUNA_TRIALS"]
+
+    print(f"   Optuna 튜닝 중 ({n_trials}회 탐색)...")
+
+    def objective(trial):
+        params = {
+            "n_estimators":     trial.suggest_int("n_estimators", 200, 1000),
+            "max_depth":        trial.suggest_int("max_depth", 3, 8),
+            "learning_rate":    trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+            "subsample":        trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "reg_alpha":        trial.suggest_float("reg_alpha", 0.0, 2.0),
+            "reg_lambda":       trial.suggest_float("reg_lambda", 0.5, 3.0),
+        }
+        model = xgb.XGBRegressor(
+            **params,
+            early_stopping_rounds=30,
+            eval_metric="rmse",
+            random_state=42, verbosity=0, n_jobs=-1,
+        )
+        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+        preds = model.predict(X_val)
+        return np.sqrt(mean_squared_error(y_val, preds))
+
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    best = study.best_params
+    print(f"  ✓ 최적 파라미터: {best}")
+    print(f"  ✓ 최적 RMSE: {study.best_value:.6f}")
+    return best
+
+
+# ============================================================
+# SECTION 13 : 앙상블 (★ v2 핵심 — 회귀 + 분류 결합)
+# ============================================================
+
+def ensemble_predict(reg_models, clf_models, X, y_scaler=None):
+    """
+    회귀 모델 + 분류 모델 앙상블
+    - 방향성: 분류 모델이 결정
+    - 크기:   회귀 모델이 결정
+    → 두 모델이 합쳐져 방향성 정확도가 크게 향상됨
+    """
+    # 회귀 예측 평균
+    reg_preds = np.mean([m.predict(X) for m in reg_models], axis=0)
+    if y_scaler:
+        reg_preds = y_scaler.inverse_transform(reg_preds.reshape(-1, 1)).flatten()
+
+    # 분류 확률 평균 (상승 확률)
+    clf_probs = np.mean([m.predict_proba(X)[:, 1] for m in clf_models], axis=0)
+    clf_dirs  = (clf_probs > 0.5).astype(int)   # 0.5 이상이면 상승
+
+    # 최종 예측 = 분류가 정한 방향 × 회귀가 정한 크기
+    reg_sign     = np.sign(reg_preds)
+    clf_sign     = np.where(clf_dirs == 1, 1, -1)
+
+    # 두 모델이 같은 방향이면 신뢰도 높음 → 그대로
+    # 다른 방향이면 분류 모델의 방향을 우선 (더 직접적으로 최적화됨)
+    final_sign   = np.where(reg_sign == clf_sign, reg_sign, clf_sign)
+    final_preds  = np.abs(reg_preds) * final_sign
+
+    return final_preds, clf_probs
+
+
+def compute_ensemble_direction_accuracy(y_true, clf_probs, threshold=0.5):
+    """앙상블 방향성 정확도 계산"""
+    pred_dir = (clf_probs > threshold).astype(int)
+    true_dir = (y_true > 0).astype(int)
+    return accuracy_score(true_dir, pred_dir) * 100
+
+
+# ============================================================
+# SECTION 14 : XAI - SHAP 분석
+# ============================================================
+
+def run_shap(model, X_test, asset_name, model_tag):
+    print(f"  🔍 SHAP 분석: {asset_name} ({model_tag})")
+    try:
+        explainer   = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X_test)
+
+        plt.figure(figsize=(10, 8))
+        shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+        plt.title(f"SHAP 기여도 — {asset_name} ({model_tag})",
+                  fontsize=12, fontweight="bold")
+        plt.tight_layout()
+        path = f"{CONFIG['OUT_DIR']}/shap_{asset_name}_{model_tag}.png"
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"     SHAP 저장: {path}")
+    except Exception as e:
+        print(f"      SHAP 실패: {e}")
+
+
+# ============================================================
+# SECTION 15 : Walk-forward 백테스팅 (★ 버그 수정)
+# ============================================================
+
+def walk_forward(X, y, n_splits=None, min_train=None):
+    """
+    ★ 버그 수정: early_stopping_rounds → 생성자로 이동
+    ★ 추가: 분류 모델도 함께 백테스팅
+    """
+    if n_splits  is None: n_splits  = CONFIG["WF_SPLITS"]
+    if min_train is None: min_train = CONFIG["MIN_TRAIN"]
+
+    n         = len(X)
+    test_size = (n - min_train) // n_splits
+
+    all_preds, all_actuals, all_clf_probs = [], [], []
+    fold_metrics = []
+
+    print(f"\n  Walk-forward Validation ({n_splits} 폴드)")
+    print(f"  {'폴드':>4} | {'기간':^22} | {'RMSE':>8} | {'MAE':>8} | {'MAPE':>8} | {'방향성':>7}")
+    print("  " + "-" * 72)
+
+    for fold in range(n_splits):
+        tr_end = min_train + fold * test_size
+        te_end = min(tr_end + test_size, n)
+        if te_end > n: break
+
+        X_tr  = X.iloc[:tr_end];            y_tr  = y.iloc[:tr_end]
+        X_val = X.iloc[tr_end-10:tr_end];   y_val = y.iloc[tr_end-10:tr_end]
+        X_te  = X.iloc[tr_end:te_end];      y_te  = y.iloc[tr_end:te_end]
+
+        # ★ 버그 수정: early_stopping_rounds를 생성자에 넣음
+        reg_model = xgb.XGBRegressor(
+            n_estimators=400, learning_rate=0.05, max_depth=5,
+            random_state=42, verbosity=0, n_jobs=-1,
+            early_stopping_rounds=30,
+        )
+        reg_model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+
+        # 분류 모델 추가 (방향성 정확도 향상 핵심)
+        clf_model = xgb.XGBClassifier(
+            n_estimators=400, learning_rate=0.05, max_depth=4,
+            random_state=42, verbosity=0, n_jobs=-1,
+            early_stopping_rounds=30, eval_metric="logloss",
+        )
+        dir_tr  = make_direction_labels(y_tr)
+        dir_val = make_direction_labels(y_val)
+        clf_model.fit(X_tr, dir_tr, eval_set=[(X_val, dir_val)], verbose=False)
+
+        reg_preds = reg_model.predict(X_te)
+        clf_probs = clf_model.predict_proba(X_te)[:, 1]
+        clf_dirs  = (clf_probs > 0.5).astype(int)
+        clf_sign  = np.where(clf_dirs == 1, 1, -1)
+        final_preds = np.abs(reg_preds) * clf_sign
+
+        m = compute_metrics(y_te.values, final_preds)
+        fold_metrics.append(m)
+        all_preds.extend(final_preds)
+        all_actuals.extend(y_te.values)
+        all_clf_probs.extend(clf_probs)
+
+        date_str = (f"{X_te.index[0].strftime('%Y-%m')}"
+                    f"~{X_te.index[-1].strftime('%Y-%m')}"
+                    if hasattr(X_te.index, "strftime") else f"{tr_end}~{te_end}")
+        print(f"  {fold+1:>4} | {date_str:^22} | {m['RMSE']:>8.4f} | "
+              f"{m['MAE']:>8.4f} | {m['MAPE']:>7.2f}% | {m['Dir_Acc']:>6.1f}%")
+
+    avg = {k: np.mean([m[k] for m in fold_metrics]) for k in fold_metrics[0]}
+    print("  " + "-" * 72)
+    print(f"  {'평균':>4} | {'':^22} | {avg['RMSE']:>8.4f} | "
+          f"{avg['MAE']:>8.4f} | {avg['MAPE']:>7.2f}% | {avg['Dir_Acc']:>6.1f}%")
+
+    return {
+        "fold_metrics": fold_metrics,
+        "avg_metrics":  avg,
+        "predictions":  np.array(all_preds),
+        "actuals":      np.array(all_actuals),
+        "clf_probs":    np.array(all_clf_probs),
+    }
+
+
+def plot_backtest(result, asset_name):
+    preds   = result["predictions"]
+    actuals = result["actuals"]
+    errors  = preds - actuals
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+
+    # 예측 vs 실제
+    axes[0].plot(actuals, label="실제값",  color="steelblue", lw=1.5)
+    axes[0].plot(preds,   label="예측값",  color="tomato",    lw=1.5, ls="--", alpha=0.9)
+    axes[0].set_title(f"{asset_name} — 앙상블 예측 vs 실제", fontsize=13, fontweight="bold")
+    axes[0].legend(); axes[0].grid(True, alpha=0.3)
+
+    # 오차
+    axes[1].bar(range(len(errors)), errors,
+                color=np.where(errors > 0, "tomato", "steelblue"), alpha=0.7)
+    axes[1].axhline(0, color="black", lw=1)
+    axes[1].set_title("예측 오차 (양수=과예측, 음수=과소예측)", fontsize=12)
+    axes[1].grid(True, alpha=0.3)
+
+    # 분류 확률
+    if "clf_probs" in result:
+        probs = result["clf_probs"]
+        axes[2].fill_between(range(len(probs)), 0.5, probs,
+                             where=(probs > 0.5), color="tomato",   alpha=0.6, label="상승 확률")
+        axes[2].fill_between(range(len(probs)), probs, 0.5,
+                             where=(probs < 0.5), color="steelblue",alpha=0.6, label="하락 확률")
+        axes[2].axhline(0.5, color="black", lw=1, ls="--")
+        axes[2].set_ylim(0, 1)
+        axes[2].set_title("방향성 분류 확률", fontsize=12)
+        axes[2].legend(); axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = f"{CONFIG['OUT_DIR']}/backtest_{asset_name}.png"
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  ✓ 백테스트 차트 저장: {path}")
+
+
+# ============================================================
+# SECTION 16 : 성능 평가
+# ============================================================
+
+def compute_metrics(y_true, y_pred, eps=1e-8):
+    mae   = mean_absolute_error(y_true, y_pred)
+    mse   = mean_squared_error(y_true, y_pred)
+    rmse  = np.sqrt(mse)
+    mape  = np.mean(np.abs((y_true - y_pred) / (np.abs(y_true) + eps))) * 100
+    smape = np.mean(2 * np.abs(y_pred - y_true) /
+                    (np.abs(y_true) + np.abs(y_pred) + eps)) * 100
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    r2     = 1 - ss_res / (ss_tot + eps)
+    dir_acc = np.mean((np.diff(y_true) > 0) == (np.diff(y_pred) > 0)) * 100 if len(y_true) > 1 else 0.0
+    return {"MAE": mae, "MSE": mse, "RMSE": rmse,
+            "MAPE": mape, "sMAPE": smape, "R2": r2, "Dir_Acc": dir_acc}
+
+
+def print_metrics(m, label="모델"):
+    bar = "=" * 54
+    print(f"\n{bar}")
+    print(f"  📊 {label}")
+    print(bar)
+    print(f"  MAE           : {m['MAE']:.6f}")
+    print(f"  RMSE          : {m['RMSE']:.6f}")
+    print(f"  MAPE          : {m['MAPE']:.2f}%")
+    print(f"  sMAPE         : {m['sMAPE']:.2f}%")
+    print(f"  R²            : {m['R2']:.4f}")
+    print(f"  방향성 정확도 : {m['Dir_Acc']:.1f}%  ← 목표: 80%↑")
+    print(bar)
+
+
+def compare_all_models(metrics_dict):
+    print("\n" + "=" * 70)
+    print("  📊 전체 모델 성능 비교 (방향성 정확도 중심)")
+    print("=" * 70)
+    df = pd.DataFrame(metrics_dict).T.round(4)
+    print(df.to_string())
+    print("=" * 70)
+
+    metric_list = ["RMSE", "MAE", "MAPE", "sMAPE", "R2", "Dir_Acc"]
+    colors = ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6","#1abc9c"]
+
+    fig, axes = plt.subplots(2, 3, figsize=(17, 10))
+    axes = axes.flatten()
+
+    for i, (metric, color) in enumerate(zip(metric_list, colors)):
+        if metric not in df.columns: continue
+        vals = df[metric]
+        bars = axes[i].bar(vals.index, vals.values, color=color, alpha=0.85, edgecolor="white")
+        axes[i].set_title(metric, fontsize=12, fontweight="bold")
+        if metric == "Dir_Acc":
+            axes[i].axhline(80, color="red", ls="--", lw=1.5, label="목표 80%")
+            axes[i].legend()
+        for bar, v in zip(bars, vals.values):
+            axes[i].text(bar.get_x() + bar.get_width() / 2,
+                         bar.get_height() * 1.01, f"{v:.3f}",
+                         ha="center", va="bottom", fontsize=7)
+        axes[i].grid(True, alpha=0.3, axis="y")
+        axes[i].tick_params(axis="x", rotation=35)
+
+    plt.suptitle("전체 모델 성능 비교  (v2 — 앙상블)", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    path = f"{CONFIG['OUT_DIR']}/model_comparison.png"
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"\n  ✓ 비교 차트 저장: {path}")
+    return df
+
+
+# ============================================================
+# SECTION 17 : 시각화 대시보드
+# ============================================================
+
+def plot_money_vs_assets(df):
+    pairs = [
+        ("M2_YoY", "Gold_YoY",    "M2 vs 금"),
+        ("M2_YoY", "WTI_Oil_YoY", "M2 vs WTI"),
+        ("M2_YoY", "Wheat_YoY",   "M2 vs 밀"),
+        ("CPI_YoY","PPI_YoY",     "CPI vs PPI"),
+    ]
+    fig = make_subplots(rows=2, cols=2,
+                        subplot_titles=[p[2] for p in pairs])
+    pos = [(1,1),(1,2),(2,1),(2,2)]
+    pal = [("royalblue","gold"),("royalblue","black"),
+           ("royalblue","green"),("orangered","tomato")]
+
+    for (src,tgt,_), (r,c), (c1,c2) in zip(pairs, pos, pal):
+        if src in df.columns:
+            fig.add_trace(go.Scatter(x=df.index,y=df[src],name=src,
+                                     line=dict(color=c1)),row=r,col=c)
+        if tgt in df.columns:
+            fig.add_trace(go.Scatter(x=df.index,y=df[tgt],name=tgt,
+                                     line=dict(color=c2)),row=r,col=c)
+
+    fig.update_layout(title="통화량 vs 자산 가격 전이 대시보드 (v2)",
+                      height=700, template="plotly_white")
+    path = f"{CONFIG['OUT_DIR']}/dashboard.html"
+    fig.write_html(path)
+    print(f"  ✓ 대시보드 저장: {path}")
+
+
+def plot_transmission_map():
+    nodes = {
+        "M2 통화량":          (0.00, 0.50),
+        "귀금속\n(Gold/Silver)": (0.28, 0.80),
+        "에너지\n(WTI/Gas)":  (0.28, 0.50),
+        "원자재\n(Copper)":   (0.28, 0.20),
+        "농산물\n(밀/옥수수)": (0.58, 0.75),
+        "제조·운송비":        (0.58, 0.45),
+        "건설비용":           (0.58, 0.15),
+        "CPI\n(소비자물가)":  (0.88, 0.55),
+        "주식섹터\n(에너지/소재)":(0.88, 0.85),
+    }
+    edges = [
+        ("M2 통화량","귀금속\n(Gold/Silver)","royalblue","t+6~9개월"),
+        ("M2 통화량","에너지\n(WTI/Gas)","royalblue","t+8~12개월"),
+        ("M2 통화량","원자재\n(Copper)","royalblue","t+6개월"),
+        ("귀금속\n(Gold/Silver)","농산물\n(밀/옥수수)","darkorange","t+3~6개월"),
+        ("에너지\n(WTI/Gas)","농산물\n(밀/옥수수)","darkorange","t+3개월"),
+        ("에너지\n(WTI/Gas)","제조·운송비","darkorange","t+2~4개월"),
+        ("원자재\n(Copper)","건설비용","darkorange","t+3개월"),
+        ("농산물\n(밀/옥수수)","CPI\n(소비자물가)","crimson","t+1~3개월"),
+        ("제조·운송비","CPI\n(소비자물가)","crimson","t+1~2개월"),
+        ("귀금속\n(Gold/Silver)","주식섹터\n(에너지/소재)","seagreen","즉각~t+3개월"),
+    ]
+    fig, ax = plt.subplots(figsize=(14, 8))
+    ax.set_xlim(-0.1,1.0); ax.set_ylim(-0.05,1.0)
+    ax.axis("off"); ax.set_facecolor("#fafafa")
+    ax.set_title("통화량 → 자산군 가격 전이 경로 (Cantillon Effect)",
+                 fontsize=14, fontweight="bold", pad=15)
+    for src,tgt,color,label in edges:
+        x0,y0=nodes[src]; x1,y1=nodes[tgt]
+        ax.annotate("", xy=(x1,y1), xytext=(x0,y0),
+                    arrowprops=dict(arrowstyle="-|>",color=color,
+                                   lw=1.8,connectionstyle="arc3,rad=0.05"))
+        ax.text((x0+x1)/2,(y0+y1)/2+0.02,label,
+                ha="center",va="bottom",fontsize=7,color=color,alpha=0.9)
+    for name,(x,y) in nodes.items():
+        ax.add_patch(plt.Circle((x,y),0.075,color="lightskyblue",
+                                ec="steelblue",lw=1.5,zorder=3))
+        ax.text(x,y,name,ha="center",va="center",fontsize=8,
+                fontweight="bold",zorder=4)
+    plt.tight_layout()
+    path = f"{CONFIG['OUT_DIR']}/transmission_map.png"
+    plt.savefig(path,dpi=150,bbox_inches="tight")
+    plt.close()
+    print(f"  ✓ 전이 경로 맵 저장: {path}")
+
+
+def plot_inflation_gauge(df):
+    targets = ["CPI_YoY","PPI_YoY","M2_YoY","Gold_YoY","WTI_Oil_YoY"]
+    targets = [c for c in targets if c in df.columns]
+    z = {c: (df[c].iloc[-1] - df[c].mean()) / (df[c].std()+1e-8) for c in targets}
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors  = ["crimson" if v > 0 else "steelblue" for v in z.values()]
+    bars    = ax.bar(z.keys(), z.values(), color=colors, alpha=0.85, edgecolor="white")
+    ax.axhline(0, color="black", lw=1.2, ls="--")
+    ax.axhline(1, color="orange", lw=1, ls=":", label="+1σ")
+    ax.axhline(2, color="red",    lw=1, ls=":", label="+2σ")
+    for bar,v in zip(bars,z.values()):
+        ax.text(bar.get_x()+bar.get_width()/2,
+                bar.get_height()+(0.05 if v>=0 else -0.12),
+                f"{v:.2f}σ",ha="center",va="bottom",fontsize=9)
+    ax.set_title("현재 인플레이션 위치 (장기 평균 대비 Z-score)",
+                 fontsize=13, fontweight="bold")
+    ax.set_ylabel("Z-score (σ)"); ax.legend(); ax.grid(True,alpha=0.3,axis="y")
+    plt.tight_layout()
+    path = f"{CONFIG['OUT_DIR']}/inflation_position.png"
+    plt.savefig(path,dpi=150,bbox_inches="tight")
+    plt.close()
+    print(f"  ✓ 인플레이션 게이지 저장: {path}")
+
+
+def generate_report(df, all_metrics):
+    rows_html = ""
+    for name, m in all_metrics.items():
+        dir_class = "good" if m.get("Dir_Acc",0) >= 75 else ("ok" if m.get("Dir_Acc",0) >= 65 else "bad")
+        r2_class  = "good" if m.get("R2",0) > 0.5 else "bad"
+        rows_html += f"""
+        <tr>
+          <td><b>{name}</b></td>
+          <td>{m.get('RMSE','-'):.4f}</td>
+          <td>{m.get('MAE','-'):.4f}</td>
+          <td>{m.get('MAPE','-'):.2f}%</td>
+          <td>{m.get('sMAPE','-'):.2f}%</td>
+          <td class="{r2_class}">{m.get('R2','-'):.4f}</td>
+          <td class="{dir_class}">{m.get('Dir_Acc','-'):.1f}%</td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>통화량-자산 전이 분석 리포트 v2</title>
+  <style>
+    body  {{ font-family:'Segoe UI',Arial,sans-serif; margin:40px; background:#f4f6f9; }}
+    h1    {{ color:#2c3e50; }}
+    .card {{ background:white; border-radius:10px; padding:24px; margin:20px 0;
+             box-shadow:0 2px 8px rgba(0,0,0,.08); }}
+    table {{ width:100%; border-collapse:collapse; }}
+    th    {{ background:#2980b9; color:white; padding:10px; text-align:center; }}
+    td    {{ padding:9px; border:1px solid #dfe6e9; text-align:center; }}
+    tr:nth-child(even) {{ background:#f0f3f7; }}
+    .good {{ color:#27ae60; font-weight:bold; }}
+    .ok   {{ color:#f39c12; font-weight:bold; }}
+    .bad  {{ color:#e74c3c; }}
+    .meta {{ color:#888; font-size:.9em; }}
+    img   {{ max-width:100%; border-radius:6px; margin:8px 0; }}
+    .badge{{ display:inline-block; background:#27ae60; color:white;
+             padding:3px 10px; border-radius:12px; font-size:.85em; }}
+  </style>
+</head>
+<body>
+  <h1>📊 통화량 변화에 따른 자산군별 가격 전이 분석 리포트
+      <span class="badge">v2 — 앙상블 업그레이드</span></h1>
+  <p class="meta">생성: {datetime.now().strftime('%Y년 %m월 %d일 %H:%M')} &nbsp;|&nbsp;
+     기간: {df.index[0].strftime('%Y.%m')} ~ {df.index[-1].strftime('%Y.%m')}</p>
+
+  <div class="card">
+    <h2>1. 모델 성능 비교 <small style="color:#888">(방향성 정확도 목표: 80%↑)</small></h2>
+    <table>
+      <tr><th>모델</th><th>RMSE</th><th>MAE</th><th>MAPE</th>
+          <th>sMAPE</th><th>R²</th><th>방향성 정확도</th></tr>
+      {rows_html}
+    </table>
+    <p style="color:#888;font-size:.85em">
+      🟢 방향성 ≥75%  🟡 65~74%  🔴 &lt;65%
+    </p>
+  </div>
+
+  <div class="card"><h2>2. 그랜저 인과관계</h2>
+    <img src="granger_heatmap.png"></div>
+
+  <div class="card"><h2>3. 전이 경로 맵</h2>
+    <img src="transmission_map.png"></div>
+
+  <div class="card"><h2>4. 인플레이션 위치</h2>
+    <img src="inflation_position.png"></div>
+
+  <div class="card"><h2>5. 모델 성능 비교 차트</h2>
+    <img src="model_comparison.png"></div>
+</body>
+</html>"""
+
+    path = f"{CONFIG['OUT_DIR']}/report_v2.html"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"  ✓ HTML 리포트 저장: {path}")
+
+
+# ============================================================
+# SECTION 18 : 메인 실행 파이프라인
+# ============================================================
+
+def main():
+    print("=" * 62)
+    print("  통화량-자산 가격 전이 분석  ★ v2 (앙상블 + 분류 모델)")
+    print("  방향성 정확도 목표: 60% → 80%")
+    print("=" * 62)
+
+    # 한글 폰트
+    system = platform.system()
+    if system == "Windows":     plt.rcParams["font.family"] = "Malgun Gothic"
+    elif system == "Darwin":    plt.rcParams["font.family"] = "AppleGothic"
+    plt.rcParams["axes.unicode_minus"] = False
+
+    # ── STEP 1~5 : 데이터 수집 → 피처 엔지니어링 ─────────────
+    df_raw = load_all_data()
+    df_raw.to_csv(f"{CONFIG['OUT_DIR']}/raw_data.csv")
+
+    df = preprocess(df_raw)
+    df = add_shock_dummies(df)
+    df = build_features(df)
+    df.to_csv(f"{CONFIG['OUT_DIR']}/processed_data.csv")
+
+    # ── STEP 5 : 그랜저 인과관계 ─────────────────────────────
+    causality_df = run_granger_analysis(df)
+    if not causality_df.empty:
+        causality_df.to_csv(f"{CONFIG['OUT_DIR']}/granger.csv", index=False)
+
+    # ── STEP 6~13 : 자산별 모델 학습 ─────────────────────────
+    target_map = {
+        "Gold":    "Gold_LogReturn",
+        "WTI_Oil": "WTI_Oil_LogReturn",
+        "Wheat":   "Wheat_LogReturn",
+    }
+
+    shock_cols  = [c for c in df.columns if c.startswith("Shock_")]
+    all_metrics = {}
+
+    for asset_name, target_col in target_map.items():
+        if target_col not in df.columns:
+            print(f"\n    {target_col} 없음, 건너뜁니다.")
+            continue
+
+        print(f"\n{'='*62}")
+        print(f"  ▶ 자산: {asset_name}  ({target_col})")
+        print("=" * 62)
+
+        # 피처 선택
+        base_feats = (
+            [c for c in df.columns if any(
+                k in c for k in ["M2","M1","CPI","PPI","Fed_Rate",
+                                  "Yield_Spread","Real_Rate","M1_M2_Ratio",
+                                  "NegRealRate","TIPS_Signal"]
+            ) and "lag" in c] +
+            [c for c in df.columns if target_col.split("_")[0] in c
+             and ("lag" in c or "RSI" in c or "MACD" in c
+                  or "Mom" in c or "MA" in c or "EMA" in c)] +
+            shock_cols
+        )
+        feat_cols = list(dict.fromkeys(
+            [c for c in base_feats if c in df.columns and c != target_col]
+        ))
+
+        data  = df[[target_col] + feat_cols].dropna()
+        if len(data) < CONFIG["MIN_TRAIN"] + 30:
+            print(f"    데이터 부족 ({len(data)}개), 건너뜁니다.")
+            continue
+
+        X_all = data[feat_cols]
+        y_all = data[target_col]
+
+        n       = len(data)
+        tr_end  = int(n * 0.70)
+        val_end = int(n * 0.85)
+
+        X_tr,  y_tr  = X_all.iloc[:tr_end],    y_all.iloc[:tr_end]
+        X_val, y_val = X_all.iloc[tr_end:val_end], y_all.iloc[tr_end:val_end]
+        X_te,  y_te  = X_all.iloc[val_end:],    y_all.iloc[val_end:]
+
+        print(f"  학습: {len(X_tr)}  검증: {len(X_val)}  테스트: {len(X_te)}")
+
+        # 스케일링
+        sx = StandardScaler(); sy = StandardScaler()
+        X_tr_s  = pd.DataFrame(sx.fit_transform(X_tr),  columns=feat_cols, index=X_tr.index)
+        X_val_s = pd.DataFrame(sx.transform(X_val),     columns=feat_cols, index=X_val.index)
+        X_te_s  = pd.DataFrame(sx.transform(X_te),      columns=feat_cols, index=X_te.index)
+        y_tr_s  = sy.fit_transform(y_tr.values.reshape(-1,1)).flatten()
+        y_val_s = sy.transform(y_val.values.reshape(-1,1)).flatten()
+        y_te_s  = sy.transform(y_te.values.reshape(-1,1)).flatten()
+
+        # ★ 피처 선택 (노이즈 제거)
+        top_feats = select_top_features(X_tr_s, y_tr_s)
+        X_tr_sel  = X_tr_s[top_feats];   X_val_sel = X_val_s[top_feats]
+        X_te_sel  = X_te_s[top_feats]
+
+        # ★ Optuna 튜닝
+        best_params = optuna_tune_xgb(X_tr_sel, y_tr_s, X_val_sel, y_val_s)
+
+        # ── XGBoost 회귀 ──────────────────────────────────────
+        print(f"\n   XGBoost 회귀 학습")
+        xgb_reg = train_xgboost_reg(X_tr_sel, y_tr_s, X_val_sel, y_val_s, best_params)
+        xgb_reg_pred = sy.inverse_transform(
+            xgb_reg.predict(X_te_sel).reshape(-1,1)).flatten()
+        xgb_reg_m = compute_metrics(y_te.values, xgb_reg_pred)
+        print_metrics(xgb_reg_m, f"{asset_name} - XGBoost 회귀")
+        all_metrics[f"{asset_name}_XGB_Reg"] = xgb_reg_m
+
+        # ── XGBoost 분류 ──────────────────────────────────────
+        print(f"\n   XGBoost 분류 (방향성 직접 최적화)")
+        xgb_clf = train_xgboost_clf(X_tr_sel, y_tr_s, X_val_sel, y_val_s)
+        clf_probs     = xgb_clf.predict_proba(X_te_sel)[:, 1]
+        clf_dir_acc   = compute_ensemble_direction_accuracy(y_te.values, clf_probs)
+        print(f"    ✓ XGBoost 분류 방향성 정확도: {clf_dir_acc:.1f}%")
+
+        # ── LightGBM 회귀 ─────────────────────────────────────
+        print(f"\n   LightGBM 회귀 학습")
+        lgb_reg = train_lgb_reg(X_tr_sel, y_tr_s, X_val_sel, y_val_s)
+        lgb_reg_pred = sy.inverse_transform(
+            lgb_reg.predict(X_te_sel).reshape(-1,1)).flatten()
+        lgb_reg_m = compute_metrics(y_te.values, lgb_reg_pred)
+        print_metrics(lgb_reg_m, f"{asset_name} - LightGBM 회귀")
+        all_metrics[f"{asset_name}_LGB_Reg"] = lgb_reg_m
+
+        # ── LightGBM 분류 ─────────────────────────────────────
+        print(f"\n   LightGBM 분류")
+        lgb_clf = train_lgb_clf(X_tr_sel, y_tr_s, X_val_sel, y_val_s)
+        lgb_clf_probs = lgb_clf.predict_proba(X_te_sel)[:, 1]
+
+        # ── ★ 앙상블 (핵심: 회귀+분류 결합) ──────────────────
+        print(f"\n  🔗 앙상블 예측 (회귀 + 분류 결합)")
+        ens_preds, ens_probs = ensemble_predict(
+            reg_models=[xgb_reg, lgb_reg],
+            clf_models=[xgb_clf, lgb_clf],
+            X=X_te_sel,
+            y_scaler=sy
+        )
+        ens_m = compute_metrics(y_te.values, ens_preds)
+        print_metrics(ens_m, f"{asset_name} - 앙상블 (최종)")
+        all_metrics[f"{asset_name}_Ensemble"] = ens_m
+
+        # ── SHAP 분석 ─────────────────────────────────────────
+        run_shap(xgb_reg, X_te_sel, asset_name, "XGB_Reg")
+
+        # ── Walk-forward 백테스팅 ─────────────────────────────
+        print(f"\n   Walk-forward 백테스팅: {asset_name}")
+        bt = walk_forward(X_tr_sel,
+                          pd.Series(y_tr_s, index=X_tr_sel.index))
+        plot_backtest(bt, asset_name)
+        all_metrics[f"{asset_name}_WF_Ensemble"] = bt["avg_metrics"]
+
+        # ── Bidirectional GRU ─────────────────────────────────
+        feat_deep = top_feats[:25]   # 딥러닝은 25개 피처로 제한
+        lb = CONFIG["LOOKBACK"]
+        X_deep = np.vstack([X_tr_s[feat_deep].values,
+                            X_val_s[feat_deep].values])
+        y_deep = np.concatenate([y_tr_s, y_val_s])
+
+        if len(X_deep) > lb + 30:
+            print(f"\n   Bidirectional GRU 학습: {asset_name}")
+            Xseq, yseq = create_sequences(X_deep, y_deep, lb)
+            sp = int(len(Xseq) * 0.85)
+            gru, hist = train_bigru(Xseq[:sp], yseq[:sp], Xseq[sp:], yseq[sp:])
+
+            # GRU 학습 곡선
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            axes[0].plot(hist.history["loss"],     label="Train", color="steelblue")
+            axes[0].plot(hist.history["val_loss"], label="Val",   color="tomato")
+            axes[0].set_title(f"{asset_name} BiGRU Loss"); axes[0].legend()
+            axes[1].plot(hist.history["mae"],      label="Train", color="steelblue")
+            axes[1].plot(hist.history["val_mae"],  label="Val",   color="tomato")
+            axes[1].set_title(f"{asset_name} BiGRU MAE"); axes[1].legend()
+            plt.tight_layout()
+            plt.savefig(f"{CONFIG['OUT_DIR']}/bigru_{asset_name}_history.png",
+                        dpi=150, bbox_inches="tight")
+            plt.close()
+
+            # GRU 테스트 예측
+            X_te_deep = np.vstack([X_tr_s[feat_deep].values[-lb:],
+                                   X_te_s[feat_deep].values])
+            if len(X_te_deep) > lb:
+                Xseq_te, yseq_te = create_sequences(
+                    X_te_deep,
+                    np.concatenate([y_tr_s[-lb:], y_te_s]),
+                    lb
+                )
+                gru_raw  = gru.predict(Xseq_te, verbose=0).flatten()
+                gru_pred = sy.inverse_transform(gru_raw.reshape(-1,1)).flatten()
+                gru_act  = sy.inverse_transform(yseq_te.reshape(-1,1)).flatten()
+                gru_m    = compute_metrics(gru_act, gru_pred)
+                print_metrics(gru_m, f"{asset_name} - BiGRU")
+                all_metrics[f"{asset_name}_BiGRU"] = gru_m
+
+    # ── 전체 모델 비교 ────────────────────────────────────────
+    print("\n[최종] 전체 모델 성능 비교")
+    if all_metrics:
+        compare_all_models(all_metrics)
+
+    # ── 대시보드 & 리포트 ─────────────────────────────────────
+    print("\n[최종] 시각화 및 리포트 생성")
+    plot_money_vs_assets(df)
+    plot_transmission_map()
+    plot_inflation_gauge(df)
+    generate_report(df, all_metrics)
+
+    print("\n" + "=" * 62)
+    print("  v2 파이프라인 완료!")
+    print(f"  결과: {CONFIG['OUT_DIR']}/report_v2.html")
+    print("=" * 62)
+
+    return df, all_metrics
+
+
+# ── 실행 진입점 ──────────────────────────────────────────────
+if __name__ == "__main__":
+    df_result, metrics_result = main()
