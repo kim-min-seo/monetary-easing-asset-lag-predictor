@@ -30,6 +30,7 @@ proj/
 ├── 03_analysis.py             # 🔍  실증 분석     (ADF · Granger · VAR · IRF)
 ├── 04_visualization.py        # 📊  시각화        (히트맵 · 시차 플롯 · IRF 그래프)
 ├── 05_modeling.py             # 🤖  예측 모델     (BiGRU · XGBoost · LightGBM)
+├── 06_modeling2.py            # 🤖  기타 예측 모델......
 │
 ├── data/
 │   ├── raw/                   # 원본 데이터 (수집 직후 CSV)
