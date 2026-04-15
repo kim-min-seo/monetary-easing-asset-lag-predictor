@@ -98,8 +98,13 @@ torch.manual_seed(42)
 # ──────────────────────────────────────────────────────────
 #  ★ CONFIG
 # ──────────────────────────────────────────────────────────
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 CONFIG = {
-    "FRED_API_KEY": "60d2a8e19966bb6b8412e4bc9e02bca3",
+    "FRED_API_KEY": os.getenv("FRED_API_KEY"),
 
     "START_DATE": "2000-01-01",
     "END_DATE":   datetime.today().strftime("%Y-%m-%d"),
