@@ -65,10 +65,9 @@ run_module("05_modeling")
 
 # ── STEP 6 ──────────────────────────────────────────────────
 print("\n" + "="*62)
-print("  STEP 6/6 — 예측 모델 (XGBoost · LightGBM · 가중앙상블)")
+print("  STEP 6/6 — QVAR Spillover 분석 (경기국면별 전이 구조)")
 print("="*62)
-run_module("05_modeling")
-
+run_module("06_qvar_spillover")
 # ── 완료 ────────────────────────────────────────────────────
 print("\n" + "="*62)
 print("  ✅ v6 파이프라인 완료!")
