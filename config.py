@@ -1,7 +1,7 @@
 # ============================================================
-#  config.py — 공통 설정값 (v6)
+#  config.py — 공통 설정값 (v7 Hybrid)
 #  ★ API 키는 .env 파일에서 로드
-#  ★ 여기서 분석 파라미터만 수정
+#  ★ v7 추가: VIX (SP500 개선), PPI (CPI 개선)
 # ============================================================
 
 import os
@@ -37,7 +37,9 @@ FRED_SERIES = {
     "M2":         "M2SL",
     "GDP":        "GDP",
     "CaseShiller":"CSUSHPISA",
-    "TIPS_10Y":   "DFII10",   # ★ v6 추가: 기대 인플레이션 (Gold 유의성 확보)
+    "TIPS_10Y":   "DFII10",   # 기대 인플레이션
+    "PPI":        "PPIACO",   # ★ v7 추가: 생산자물가지수 (CPI 선행지표)
+    "PPI_Core":   "PPIFGS",   # ★ v7 추가: 완제품 PPI
 }
 
 # ──────────────────────────────────────────────
@@ -48,6 +50,7 @@ YAHOO_TICKERS = {
     "WTI":   "CL=F",
     "DXY":   "DX-Y.NYB",
     "SP500": "^GSPC",
+    "VIX":   "^VIX",    # ★ v7 추가: 변동성 지수 (SP500 선행지표)
 }
 
 # ──────────────────────────────────────────────
@@ -75,8 +78,12 @@ MONETARY_VARS = [
     "M2_YoY",
     "M2_MoM",
     "M2_Accel",
-    "TIPS_Spread",       # ★ v6 추가: 기대 인플레이션
-    "Inflation_Expect",  # ★ v6 추가: 10Y - TIPS (BEI)
+    "TIPS_Spread",       # 기대 인플레이션
+    "Inflation_Expect",  # 10Y - TIPS (BEI)
+    "PPI_YoY",           # ★ v7 추가: 생산자물가 전년비 (CPI 선행)
+    "PPI_LogReturn",     # ★ v7 추가: PPI 월간 변화율
+    "VIX_Level",         # ★ v7 추가: 변동성 지수 (SP500 역행)
+    "VIX_Change",        # ★ v7 추가: VIX 변화율
 ]
 
 # ──────────────────────────────────────────────
