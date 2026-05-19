@@ -28,7 +28,7 @@ import config as C
 def basic_preprocess(df):
     print("\n  [2-1] 기본 전처리")
     df = df.interpolate(method="linear",
-                        limit_direction="both").ffill().bfill()
+                        limit_direction="forward").ffill().bfill()
 
     new_cols = {}
     price_cols = ["Gold", "WTI", "SP500", "CaseShiller", "CPI"]
@@ -53,6 +53,28 @@ def basic_preprocess(df):
 # ──────────────────────────────────────────────
 
 def build_monetary_vars(df):
+    # ★ 외생충격 구간 식별 + 선택적 제거
+    print("\n  [2-1-b] 외생충격 구간 식별")
+    import os as _os
+    SHOCK_PERIODS = [
+        ("2008-09", "2009-03"),
+        ("2020-02", "2020-06"),
+        ("2022-02", "2023-06"),
+    ]
+    shock_mask = pd.Series(False, index=df.index)
+    for start, end in SHOCK_PERIODS:
+        shock_mask |= (df.index >= start) & (df.index <= end)
+    df["Is_Shock"] = shock_mask.astype(int)
+    n_shock = int(shock_mask.sum())
+    print(f"    외생충격 구간 식별: {n_shock}개월")
+    print(f"    리먼(2008.09~2009.03) / 코로나(2020.02~06) / 러-우(2022.02~2023.06)")
+    REMOVE_SHOCK = _os.environ.get("REMOVE_SHOCK", "0") == "1"
+    if REMOVE_SHOCK:
+        df = df[~shock_mask].copy()
+        print(f"    ★ 외생충격 {n_shock}개월 제거 → 총 {len(df)}개월")
+    else:
+        print(f"    (더미변수만 적용 / 제거: $env:REMOVE_SHOCK=\"1\"; python main.py)")
+
     print("\n  [2-2] 통화환경 독립변수 구성")
     new_cols = {}
 
@@ -278,12 +300,9 @@ def add_qvar_regime_features(df):
     # 침체기: 28.81%, 중립기: 20.82%, 과열기: 29.82%
     # ────────────────────────────────────────
     if "Regime_Recession" in new_cols:
-        new_cols["TCI_Approx"] = (
-            new_cols["Regime_Recession"]   * 28.81 +
-            new_cols["Regime_Neutral"]     * 20.82 +
-            new_cols["Regime_Overheating"] * 29.82
-        )
-        print("  ✓ TCI 근사값 피처 생성")
+        # TCI_Approx 제거: Regime_Index와 선형 관계 → 중복 (이슈 7 수정)
+        # Regime_Index로 대체
+        print("  ✓ TCI 근사값 피처 제거 (Regime_Index와 중복)")
 
     df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
     return df
@@ -423,6 +442,87 @@ def build_features(df):
         for lag in [1, 2, 3, 6]:
             new_cols[f"VIX_lag{lag}"]        = df["VIX"].shift(lag)
             new_cols[f"VIX_Change_lag{lag}"] = new_cols["VIX_Change"].shift(lag)
+
+    # ★ v8: WTI 공급측 피처 (원유 재고·생산)
+    print("  → WTI 공급측 피처 생성 (★ v8: WTI 개선)")
+    if "Oil_Stocks" in df.columns:
+        new_cols["Oil_Stocks_YoY"]   = df["Oil_Stocks"].pct_change(12) * 100
+        new_cols["Oil_Stocks_Change"] = df["Oil_Stocks"].pct_change() * 100
+        new_cols["Oil_Stocks_vs5yr"] = (
+            df["Oil_Stocks"] /
+            df["Oil_Stocks"].rolling(60).mean() - 1
+        ) * 100
+        for lag in [1, 2, 3, 6]:
+            new_cols[f"Oil_Stocks_YoY_lag{lag}"] = new_cols["Oil_Stocks_YoY"].shift(lag)
+
+    if "Oil_Prod" in df.columns:
+        new_cols["Oil_Prod_YoY"]    = df["Oil_Prod"].pct_change(12) * 100
+        new_cols["Oil_Prod_Change"] = df["Oil_Prod"].pct_change() * 100
+        for lag in [1, 2, 3]:
+            new_cols[f"Oil_Prod_YoY_lag{lag}"] = new_cols["Oil_Prod_YoY"].shift(lag)
+
+    # ★ v8: OVX (원유 변동성)
+    if "OVX" in df.columns:
+        new_cols["OVX_Level"]  = df["OVX"]
+        new_cols["OVX_Change"] = df["OVX"].diff()
+        new_cols["OVX_High"]   = (df["OVX"] > 40).astype(int)
+        for lag in [1, 2, 3]:
+            new_cols[f"OVX_lag{lag}"]       = df["OVX"].shift(lag)
+            new_cols[f"OVX_Change_lag{lag}"] = new_cols["OVX_Change"].shift(lag)
+
+    # ★ v8: Gold 개선 피처 (ETF 흐름, 금-은 비율, 금광업)
+    print("  → Gold 개선 피처 생성 (★ v8: Gold 개선)")
+    if "Silver" in df.columns and "Gold" in df.columns:
+        new_cols["Gold_Silver_Ratio"] = df["Gold"] / (df["Silver"] + 1e-8)
+        new_cols["GSR_High"]  = (new_cols["Gold_Silver_Ratio"] > 80).astype(int)
+        new_cols["GSR_Low"]   = (new_cols["Gold_Silver_Ratio"] < 60).astype(int)
+        new_cols["GSR_Change"] = new_cols["Gold_Silver_Ratio"].diff()
+        for lag in [1, 2, 3, 6]:
+            new_cols[f"GSR_lag{lag}"] = new_cols["Gold_Silver_Ratio"].shift(lag)
+
+    if "GLD" in df.columns:
+        new_cols["GLD_LogReturn"] = np.log(df["GLD"] / df["GLD"].shift(1))
+        new_cols["GLD_Flow"]      = new_cols["GLD_LogReturn"].rolling(3).sum()
+        new_cols["GLD_MA3"]       = df["GLD"].rolling(3).mean()
+        new_cols["GLD_Trend"]     = (
+            df["GLD"].rolling(3).mean() > df["GLD"].rolling(6).mean()
+        ).astype(int)
+        for lag in [1, 2, 3]:
+            new_cols[f"GLD_Flow_lag{lag}"] = new_cols["GLD_Flow"].shift(lag)
+
+    if "GDX" in df.columns and "Gold" in df.columns:
+        gdx_lr  = np.log(df["GDX"]  / df["GDX"].shift(1))
+        gold_lr = np.log(df["Gold"] / df["Gold"].shift(1))
+        new_cols["GDX_LogReturn"]   = gdx_lr
+        new_cols["GDX_Gold_Spread"] = gdx_lr - gold_lr
+        new_cols["GDX_Lead"]        = (gdx_lr > gold_lr).astype(int)
+        for lag in [1, 2, 3]:
+            new_cols[f"GDX_Gold_Spread_lag{lag}"] = new_cols["GDX_Gold_Spread"].shift(lag)
+
+    # ★ v8: CPI 가속도 목표 변수 생성
+    print("  → CPI 가속도 피처 생성 (★ v8: CPI 목표 재정의)")
+    if "CPI" in df.columns:
+        cpi_yoy = df["CPI"].pct_change(12) * 100
+        cpi_accel = cpi_yoy.diff()  # YoY 변화 → 가속도
+        new_cols["CPI_YoY_Series"]  = cpi_yoy
+        new_cols["CPI_Accel"]       = cpi_accel
+        new_cols["CPI_Accel_Dir"]   = (cpi_accel > 0).astype(int)
+        new_cols["CPI_Above_Target"] = (cpi_yoy > 2.0).astype(int)
+        for lag in [1, 2, 3, 6, 12]:
+            new_cols[f"CPI_Accel_lag{lag}"] = cpi_accel.shift(lag)
+
+    # ★ v8: 자산별 N개월 선행 방향 목표 변수
+    print("  → 선행 방향 목표 변수 생성 (★ v8: Gold 6개월, WTI 3개월)")
+    if "Gold_LogReturn" in df.columns:
+        # Gold: 6개월 후 방향
+        fwd6 = df["Gold_LogReturn"].rolling(6).sum().shift(-6)
+        new_cols["Gold_6m_Fwd"]     = fwd6
+        new_cols["Gold_6m_Dir"]     = (fwd6 > 0).astype(int)
+    if "WTI_LogReturn" in df.columns:
+        # WTI: 3개월 후 방향
+        fwd3 = df["WTI_LogReturn"].rolling(3).sum().shift(-3)
+        new_cols["WTI_3m_Fwd"]      = fwd3
+        new_cols["WTI_3m_Dir"]      = (fwd3 > 0).astype(int)
 
     df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
     df = df.loc[:, ~df.columns.duplicated()]
