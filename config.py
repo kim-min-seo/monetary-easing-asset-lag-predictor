@@ -38,8 +38,11 @@ FRED_SERIES = {
     "GDP":        "GDP",
     "CaseShiller":"CSUSHPISA",
     "TIPS_10Y":   "DFII10",   # 기대 인플레이션
-    "PPI":        "PPIACO",   # ★ v7 추가: 생산자물가지수 (CPI 선행지표)
-    "PPI_Core":   "PPIFGS",   # ★ v7 추가: 완제품 PPI
+    "PPI":        "PPIACO",   # 생산자물가지수
+    "PPI_Core":   "PPIFGS",   # 완제품 PPI
+    # ★ v8 추가: WTI 공급측 변수
+    "Oil_Stocks": "WTESTUS",  # 미국 원유 재고 (EIA 주간→월간)
+    "Oil_Prod":   "MCRFPUS2", # 미국 원유 생산량
 }
 
 # ──────────────────────────────────────────────
@@ -50,7 +53,12 @@ YAHOO_TICKERS = {
     "WTI":   "CL=F",
     "DXY":   "DX-Y.NYB",
     "SP500": "^GSPC",
-    "VIX":   "^VIX",    # ★ v7 추가: 변동성 지수 (SP500 선행지표)
+    "VIX":   "^VIX",    # 변동성 지수
+    # ★ v8 추가: 자산별 개선 변수
+    "OVX":    "^OVX",    # 원유 변동성 (WTI 개선)
+    "GLD":    "GLD",     # Gold ETF (금 자금흐름 proxy)
+    "GDX":    "GDX",     # 금광업 ETF (Gold 선행)
+    "Silver":  "SI=F",   # 은 선물 (금-은 비율용)
 }
 
 # ──────────────────────────────────────────────
@@ -83,7 +91,13 @@ MONETARY_VARS = [
     "PPI_YoY",           # ★ v7 추가: 생산자물가 전년비 (CPI 선행)
     "PPI_LogReturn",     # ★ v7 추가: PPI 월간 변화율
     "VIX_Level",         # ★ v7 추가: 변동성 지수 (SP500 역행)
-    "VIX_Change",        # ★ v7 추가: VIX 변화율
+    "VIX_Change",        # VIX 변화율
+    # ★ v8 추가
+    "OVX_Level",         # 원유 변동성 (WTI 공급 불확실성)
+    "Gold_Silver_Ratio", # 금-은 비율 (안전자산 수요 강도)
+    "GLD_Flow",          # Gold ETF 자금 흐름 proxy
+    "Oil_Stocks_YoY",    # 원유 재고 전년비
+    "Oil_Prod_YoY",      # 원유 생산 전년비
 ]
 
 # ──────────────────────────────────────────────
@@ -125,6 +139,20 @@ OPTUNA_TRIALS = 50
 # ──────────────────────────────────────────────
 WF_SPLITS  = 5
 MIN_TRAIN  = 60
+
+# ──────────────────────────────────────────────
+#  ★ v8: 자산별 예측 시차 (개선)
+#  Gold: 6개월 후 방향 (실질금리 → Gold 반응 3~6개월)
+#  WTI:  3개월 후 방향 (단기 공급 신호 포착)
+#  SP500, CaseShiller, CPI: 1개월 유지
+# ──────────────────────────────────────────────
+PREDICTION_LAG = {
+    "Gold":        6,
+    "WTI":         3,
+    "SP500":       1,
+    "CaseShiller": 1,
+    "CPI":         1,   # CPI는 가속도 예측으로 변환
+}
 
 # ──────────────────────────────────────────────
 #  경로 (자동 생성)
