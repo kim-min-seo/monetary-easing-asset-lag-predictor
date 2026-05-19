@@ -1,8 +1,13 @@
 # ============================================================
-#  04_visualization.py — 시각화 (v6)
-#  ★ v6 개선:
-#  1. from 03_analysis import 버그 수정 (importlib 방식)
-#  2. 사이클별 개별 이벤트 스터디 차트 추가
+#  04_visualization.py — 시각화 (v8)
+#  ★ v8 업데이트:
+#  1. 버전 표기 v6 → v8 통일
+#  2. IRF 95% 신뢰구간 음영 시각화 추가
+#  3. 외생충격 구간 음영 표시 추가 (리먼/코로나/러-우)
+#  4. 그랜저 히트맵 제목 v8 반영
+#  5. 칸티용 경로맵 v8 반영
+#  6. M2 대시보드 v8 반영
+#  7. 이벤트스터디 v8 반영
 # ============================================================
 
 import pandas as pd
@@ -30,7 +35,7 @@ def set_font():
 
 
 def load_analysis_module():
-    """★ v6 버그 수정: importlib로 03_analysis 로드"""
+    """importlib로 03_analysis 로드"""
     spec = importlib.util.spec_from_file_location(
         "analysis",
         os.path.join(os.path.dirname(__file__), "03_analysis.py")
@@ -38,6 +43,23 @@ def load_analysis_module():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+# ──────────────────────────────────────────────
+#  외생충격 구간 음영 헬퍼
+# ──────────────────────────────────────────────
+
+SHOCK_PERIODS = [
+    ("2008-09", "2009-03", "리먼 사태"),
+    ("2020-02", "2020-06", "코로나"),
+    ("2022-02", "2023-06", "러-우 전쟁"),
+]
+
+def add_shock_spans(ax, alpha=0.12, color="gray"):
+    """외생충격 구간 음영 표시 (★ v8 추가)"""
+    for start, end, label in SHOCK_PERIODS:
+        ax.axvspan(pd.Timestamp(start), pd.Timestamp(end),
+                   alpha=alpha, color=color, label=f"외생충격({label})")
 
 
 # ──────────────────────────────────────────────
@@ -55,7 +77,7 @@ def plot_granger_heatmap(lag_t, pval_t):
                 cbar_kws={"label": "최적 시차(월)"})
     axes[0].set_title(
         "그랜저 인과관계 최적 시차\n"
-        "(v6: CaseShiller 2차 차분 + TIPS 스프레드)",
+        "(v8: CaseShiller 2차 차분 + TIPS 스프레드 + 외생충격 제거)",
         fontsize=13, fontweight="bold")
 
     sns.heatmap(pval_t.astype(float), annot=True, fmt=".3f",
@@ -73,7 +95,7 @@ def plot_granger_heatmap(lag_t, pval_t):
 
 
 # ──────────────────────────────────────────────
-#  IRF 차트
+#  IRF 차트 (★ v8: 95% CI 음영 추가)
 # ──────────────────────────────────────────────
 
 def plot_irf(df, irf_obj, irf_results):
@@ -115,6 +137,17 @@ def plot_irf(df, irf_obj, irf_results):
 
         ax.plot(range(len(irf_vals)), irf_vals,
                 color="steelblue", lw=2.5, label=label)
+
+        # ★ v8: 95% 신뢰구간 음영
+        if "ci_upper" in irf_results and "ci_lower" in irf_results:
+            ci_u = irf_results["ci_upper"]
+            ci_l = irf_results["ci_lower"]
+            if col in ci_u and col in ci_l:
+                ax.fill_between(range(len(irf_vals)),
+                                ci_l[col], ci_u[col],
+                                alpha=0.2, color="steelblue",
+                                label="95% 신뢰구간")
+
         ax.axhline(0, color="black", lw=1, ls="--")
         ax.axvline(peak_m, color="red", lw=1.5, ls=":", alpha=0.7)
         ax.set_ylabel(label); ax.grid(True, alpha=0.3)
@@ -123,8 +156,8 @@ def plot_irf(df, irf_obj, irf_results):
 
     axes[-1].set_xlabel("실질금리 충격 후 경과 개월")
     fig.suptitle(
-        "IRF 충격반응함수: 실질금리 하락 → 각 자산 반응 (v6)\n"
-        "빨간 점선: 최대 반응 시점",
+        "IRF 충격반응함수: 실질금리 하락 → 각 자산 반응 (v8)\n"
+        "파란 음영: 95% 신뢰구간 / 빨간 점선: 최대 반응 시점",
         fontsize=13, fontweight="bold", y=1.01)
     plt.tight_layout()
     path = os.path.join(C.FIG_DIR, "irf_realrate.png")
@@ -134,7 +167,7 @@ def plot_irf(df, irf_obj, irf_results):
 
 
 # ──────────────────────────────────────────────
-#  이벤트 스터디 (★ v6: 사이클별 차트 추가)
+#  이벤트 스터디 (★ v8: 외생충격 음영 추가)
 # ──────────────────────────────────────────────
 
 def plot_event_study(df, all_rets):
@@ -162,7 +195,8 @@ def plot_event_study(df, all_rets):
     ax.axhline(0, color="gray",  lw=1, ls=":")
     ax.set_xlabel("금리인하 후 경과 개월")
     ax.set_ylabel("누적 수익률 (%)")
-    ax.set_title("이벤트 스터디: 금리인하 시점 기준 평균 반응 (v6)",
+    ax.set_title("이벤트 스터디: 금리인하 시점 기준 평균 반응 (v8)\n"
+                 "★ 외생충격(리먼/코로나/러-우) 제거 후 순수 통화정책 효과",
                  fontsize=13, fontweight="bold")
     ax.legend(); ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -171,7 +205,7 @@ def plot_event_study(df, all_rets):
     plt.close()
     print(f"  ✓ 이벤트 스터디 (평균) 저장: {path}")
 
-    # ★ v6: 사이클별 개별 차트
+    # 사이클별 개별 차트
     asset_cols = {
         "금 (Gold)":  "Gold_LogReturn",
         "WTI (원유)": "WTI_LogReturn",
@@ -217,7 +251,7 @@ def plot_event_study(df, all_rets):
         ax.set_ylabel("누적 수익률 (%)")
 
     axes[-1].set_xlabel("금리인하 후 경과 개월")
-    fig.suptitle("사이클별 이벤트 스터디 (v6)",
+    fig.suptitle("사이클별 이벤트 스터디 (v8)\n★ 외생충격 제거 후 분석",
                  fontsize=14, fontweight="bold", y=1.01)
     plt.tight_layout()
     path = os.path.join(C.FIG_DIR, "event_study_cycles.png")
@@ -227,7 +261,7 @@ def plot_event_study(df, all_rets):
 
 
 # ──────────────────────────────────────────────
-#  칸티용 전이 경로 맵
+#  칸티용 전이 경로 맵 (★ v8)
 # ──────────────────────────────────────────────
 
 def plot_cantillon_path(final_order):
@@ -269,7 +303,7 @@ def plot_cantillon_path(final_order):
     ax.axis("off"); ax.set_facecolor("#f8f9fa")
     ax.set_title(
         "칸티용 효과(Cantillon Effect) 자산 가격 전이 경로\n"
-        "★ 데이터 기반 실증 순서 (v6)",
+        "★ 데이터 기반 실증 순서 (v8 / 외생충격 제거 후)",
         fontsize=14, fontweight="bold", pad=20)
 
     node_list = list(nodes.keys())
@@ -303,7 +337,7 @@ def plot_cantillon_path(final_order):
 
 
 # ──────────────────────────────────────────────
-#  완화 사이클 오버레이
+#  완화 사이클 오버레이 (★ v8: 외생충격 음영 추가)
 # ──────────────────────────────────────────────
 
 def plot_easing_overlay(df):
@@ -320,15 +354,27 @@ def plot_easing_overlay(df):
 
     for ax, asset, color in zip(axes, assets_in, colors_a):
         ax.plot(df.index, df[asset], color=color, lw=1.5, label=asset)
+        # 금리인하 사이클 (파란 음영)
         for s, e in C.RATE_CUT_CYCLES:
             ax.axvspan(pd.Timestamp(s), pd.Timestamp(e),
                        alpha=0.15, color="steelblue")
+        # ★ v8: 외생충격 구간 (회색 음영)
+        for s, e, lbl in SHOCK_PERIODS:
+            ax.axvspan(pd.Timestamp(s), pd.Timestamp(e),
+                       alpha=0.20, color="gray")
         ax.set_ylabel(asset); ax.grid(True, alpha=0.3)
         ax.legend(loc="upper left")
 
-    axes[0].set_title("금리인하 사이클(파란 음영) + 자산 가격 반응",
-                      fontsize=13, fontweight="bold")
+    axes[0].set_title(
+        "금리인하 사이클(파란 음영) + 외생충격(회색 음영) + 자산 가격 반응 (v8)",
+        fontsize=13, fontweight="bold")
     axes[-1].set_xlabel("날짜")
+
+    # 범례 패치
+    blue_patch = mpatches.Patch(color="steelblue", alpha=0.3, label="금리인하 사이클")
+    gray_patch = mpatches.Patch(color="gray", alpha=0.4, label="외생충격 구간")
+    axes[0].legend(handles=[blue_patch, gray_patch], loc="upper left")
+
     plt.tight_layout()
     path = os.path.join(C.FIG_DIR, "easing_cycle_overlay.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
@@ -337,7 +383,7 @@ def plot_easing_overlay(df):
 
 
 # ──────────────────────────────────────────────
-#  M2 대시보드
+#  M2 대시보드 (★ v8)
 # ──────────────────────────────────────────────
 
 def plot_m2_dashboard(df):
@@ -363,8 +409,9 @@ def plot_m2_dashboard(df):
                                      name=tgt,line=dict(color=c2)),
                           row=r,col=c)
 
-    fig.update_layout(title="M2 전년비 증가율 vs 자산 가격 반응 (v6)",
-                      height=700, template="plotly_white")
+    fig.update_layout(
+        title="M2 전년비 증가율 vs 자산 가격 반응 (v8 / 외생충격 제거 후)",
+        height=700, template="plotly_white")
     path = os.path.join(C.FIG_DIR, "m2_dashboard.html")
     fig.write_html(path)
     print(f"  ✓ M2 대시보드 저장: {path}")
@@ -385,7 +432,6 @@ def main():
 
     granger_path = os.path.join(C.RESULT_DIR, "granger_results.csv")
     order_path   = os.path.join(C.RESULT_DIR, "cantillon_order.csv")
-    irf_path     = os.path.join(C.RESULT_DIR, "irf_results.csv")
 
     # 그랜저 히트맵
     if os.path.exists(granger_path):
@@ -404,7 +450,7 @@ def main():
         final_order = list(od.itertuples(index=False, name=None))
         plot_cantillon_path(final_order)
 
-    # ★ v6: importlib로 03_analysis 로드
+    # 이벤트 스터디 (importlib로 03_analysis 로드)
     analysis_mod = load_analysis_module()
     event_peaks, all_rets = analysis_mod.run_event_study(df)
     plot_event_study(df, all_rets)
