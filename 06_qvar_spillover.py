@@ -77,11 +77,28 @@ def fetch_data(api_key: str) -> pd.DataFrame:
                 else:
                     raise e
 
-    # ★ 캐시된 데이터 먼저 확인
+    # ★ 이슈10: 01_data_collection이 수집한 raw_data.csv 우선 사용
     import os
+    raw_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "data", "raw", "raw_data.csv")
     cache_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "data", "raw", "qvar_cache.csv")
+
+    if os.path.exists(raw_path):
+        print("  ✓ raw_data.csv 로드 (01_data_collection 데이터 통합)")
+        raw = pd.read_csv(raw_path, index_col=0, parse_dates=True)
+        # raw_data에서 필요한 컬럼 직접 추출
+        needed = {"CPI":"CPI","M2":"M2","CaseShiller":"CaseShiller"}
+        if all(c in raw.columns for c in needed.values()):
+            df_raw = raw[list(needed.values())].copy()
+            df_raw.columns = list(needed.keys())
+            # Gold, WTI, SP500은 yfinance로 별도 수집 (일간→월간)
+            # cache 있으면 사용
+            if os.path.exists(cache_path):
+                print("  ✓ 캐시 데이터 병합 (FRED 서버 요청 생략)")
+                return pd.read_csv(cache_path, index_col=0, parse_dates=True)
 
     if os.path.exists(cache_path):
         print("  ✓ 캐시 데이터 로드 (FRED 서버 요청 생략)")
