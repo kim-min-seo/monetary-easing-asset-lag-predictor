@@ -52,17 +52,26 @@ GRANGER_PRIORITY = {
     "Gold": [
         "Real_Rate_lag2","Real_Rate_lag3",
         "QE_Size_lag3","QE_Size_lag4",
-        "TIPS_Spread_lag4","TIPS_Spread_lag3",
+        "TIPS_Spread_lag4","TIPS_Spread_lag6",
         "Inflation_Expect_lag4","FedRate_Change_lag1",
+        # ★ v8: Gold 개선 피처
+        "GLD_Flow_lag1","GLD_Flow_lag2",
+        "GDX_Gold_Spread_lag1","GDX_Gold_Spread_lag2",
+        "GSR_lag1","GSR_Change",
     ],
     "WTI": [
         "Real_Rate_lag1","Real_Rate_lag2",
         "M2_YoY_lag1","M2_YoY_lag2",
         "TIPS_Spread_lag1","TIPS_Spread_lag2",
         "FedRate_Change_lag1",
-        "DXY_Change_lag1","DXY_Change_lag3",  # 달러 역상관
+        "DXY_Change_lag1","DXY_Change_lag3",
         "DXY_YoY_lag1","DXY_YoY_lag3",
-        "VIX_lag1","VIX_Change_lag1",          # 공포지수
+        "VIX_lag1","VIX_Change_lag1",
+        # ★ v8: WTI 공급측 피처
+        "Oil_Stocks_YoY_lag1","Oil_Stocks_YoY_lag2",
+        "Oil_Stocks_Change","Oil_Stocks_vs5yr",
+        "Oil_Prod_YoY_lag1","Oil_Prod_YoY_lag2",
+        "OVX_lag1","OVX_Change_lag1","OVX_High",
     ],
     "SP500": [
         "Real_Rate_lag1","Real_Rate_lag2",
@@ -85,6 +94,9 @@ GRANGER_PRIORITY = {
         "TIPS_Spread_lag19","FedRate_Change_lag3",
         "PPI_LogReturn_lag1","PPI_LogReturn_lag3",
         "PPI_YoY_lag1","PPI_YoY_lag3",
+        # ★ v8: CPI 가속도 관련 피처
+        "CPI_Accel_lag1","CPI_Accel_lag2","CPI_Accel_lag3",
+        "CPI_Above_Target",
     ],
 }
 
@@ -318,10 +330,21 @@ def walk_forward_select(X, y, asset_name):
         X_te = X.iloc[tr_end:te_end]; y_te = y.iloc[tr_end:te_end]
         y_te_dir = make_direction_labels(y_te.values)
 
-        xgb_c = train_xgb_clf(X_tr, y_tr.values, X_v, y_v.values)
-        xgb_p = xgb_c.predict_proba(X_te)[:,1]
-        lgb_c = train_lgb_clf(X_tr, y_tr.values, X_v, y_v.values)
-        lgb_p = lgb_c.predict_proba(X_te)[:,1]
+        # ★ 데이터 누수 수정: 폴드 내부에서 독립적으로 스케일링
+        # X는 원본(비스케일) 데이터 → 각 폴드의 훈련셋만으로 fit
+        _sx = StandardScaler(); _sy = StandardScaler()
+        _Xtr = pd.DataFrame(_sx.fit_transform(X_tr), columns=X_tr.columns, index=X_tr.index)
+        _Xv  = pd.DataFrame(_sx.transform(X_v),      columns=X_v.columns,  index=X_v.index)
+        _Xte = pd.DataFrame(_sx.transform(X_te),     columns=X_te.columns, index=X_te.index)
+        _ytr = _sy.fit_transform(y_tr.values.reshape(-1,1)).flatten()
+        _yv  = _sy.transform(y_v.values.reshape(-1,1)).flatten()
+        # 방향 레이블은 원본 y 기준 (스케일 무관하게 부호 동일)
+        y_te_dir = make_direction_labels(y_te.values)
+
+        xgb_c = train_xgb_clf(_Xtr, _ytr, _Xv, _yv)
+        xgb_p = xgb_c.predict_proba(_Xte)[:,1]
+        lgb_c = train_lgb_clf(_Xtr, _ytr, _Xv, _yv)
+        lgb_p = lgb_c.predict_proba(_Xte)[:,1]
 
         xa = accuracy_score(y_te_dir, (xgb_p>0.5).astype(int))*100
         la = accuracy_score(y_te_dir, (lgb_p>0.5).astype(int))*100
@@ -382,22 +405,32 @@ def walk_forward_backtest(X, y, selected_type, threshold, asset_name=None):
         X_v  = X.iloc[tr_end-10:tr_end]; y_v = y.iloc[tr_end-10:tr_end]
         X_te = X.iloc[tr_end:te_end]; y_te = y.iloc[tr_end:te_end]
 
+        # ★ 데이터 누수 수정: 폴드 내부에서 독립적으로 스케일링
+        _sx2 = StandardScaler(); _sy2 = StandardScaler()
+        _Xtr2 = pd.DataFrame(_sx2.fit_transform(X_tr), columns=X_tr.columns, index=X_tr.index)
+        _Xv2  = pd.DataFrame(_sx2.transform(X_v),      columns=X_v.columns,  index=X_v.index)
+        _Xte2 = pd.DataFrame(_sx2.transform(X_te),     columns=X_te.columns, index=X_te.index)
+        _ytr2 = _sy2.fit_transform(y_tr.values.reshape(-1,1)).flatten()
+        _yv2  = _sy2.transform(y_v.values.reshape(-1,1)).flatten()
+
         reg = xgb.XGBRegressor(n_estimators=400, learning_rate=0.05,
                                 max_depth=5, early_stopping_rounds=30,
                                 random_state=42, verbosity=0, n_jobs=-1)
-        reg.fit(X_tr, y_tr, eval_set=[(X_v,y_v)], verbose=False)
+        reg.fit(_Xtr2, _ytr2, eval_set=[(_Xv2, _yv2)], verbose=False)
         if selected_type == "LGB":
-            clf = train_lgb_clf(X_tr, y_tr.values, X_v, y_v.values)
+            clf = train_lgb_clf(_Xtr2, _ytr2, _Xv2, _yv2)
         else:
-            clf = train_xgb_clf(X_tr, y_tr.values, X_v, y_v.values)
+            clf = train_xgb_clf(_Xtr2, _ytr2, _Xv2, _yv2)
 
-        rp   = reg.predict(X_te)
-        cp   = clf.predict_proba(X_te)[:,1]
+        # 회귀 예측을 원본 스케일로 역변환
+        rp   = _sy2.inverse_transform(reg.predict(_Xte2).reshape(-1,1)).flatten()
+        cp   = clf.predict_proba(_Xte2)[:,1]
         sign = np.where(cp > threshold, 1, -1)
         conf = np.abs(cp - 0.5) * 2
         final = np.abs(rp) * (0.3 + 0.7*conf) * sign
 
         m = compute_metrics(y_te.values, final)
+        # ★ 이슈5: 원본 y_te로 방향성 계산 (스케일된 값 아닌 원본 기준)
         m["Dir_Acc"] = accuracy_score(
             make_direction_labels(y_te.values),
             (cp > threshold).astype(int)) * 100
@@ -572,7 +605,19 @@ def main():
     df = pd.read_csv(proc_path, index_col=0, parse_dates=True)
     print(f"  데이터 로드: {df.shape}")
 
+    # ★ v8: 자산별 최적 예측 목표 변수
+    # Gold:  6개월 후 방향 (실질금리 → Gold 반응 시차 반영)
+    # WTI:   3개월 후 방향 (공급 신호 포착 최적 시차)
+    # CPI:   가속도 방향 (Base Rate 문제 근본 해결)
     target_map = {
+        "Gold":        "Gold_6m_Dir",    # ★ v8: 6개월 선행
+        "WTI":         "WTI_3m_Dir",     # ★ v8: 3개월 선행
+        "SP500":       "SP500_LogReturn",
+        "CaseShiller": "CaseShiller_LogReturn",
+        "CPI":         "CPI_Accel_Dir",  # ★ v8: 가속도 방향
+    }
+    # 회귀 모델용 원본 수익률 (방향성 계산 기준)
+    regression_map = {
         "Gold":        "Gold_LogReturn",
         "WTI":         "WTI_LogReturn",
         "SP500":       "SP500_LogReturn",
@@ -598,6 +643,17 @@ def main():
         print(f"  ▶ 자산: {asset_name}  ({target_col})")
         print("="*62)
 
+        # ★ v8: 자산별 추가 피처 포함
+        asset_extra = {
+            "Gold":  ["GLD_Flow","GLD_Flow_lag1","GLD_Flow_lag2",
+                      "GDX_Gold_Spread_lag1","GDX_Gold_Spread_lag2",
+                      "GSR_lag1","GSR_Change","GSR_High"],
+            "WTI":   ["Oil_Stocks_YoY_lag1","Oil_Stocks_YoY_lag2",
+                      "Oil_Stocks_Change","Oil_Stocks_vs5yr",
+                      "Oil_Prod_YoY_lag1","OVX_lag1","OVX_Change_lag1","OVX_High"],
+            "CPI":   ["CPI_Accel_lag1","CPI_Accel_lag2","CPI_Accel_lag3",
+                      "CPI_Above_Target"],
+        }
         feat_cols = list(dict.fromkeys(
             mon_lag_cols +
             [c for c in df.columns if asset_name in c and
@@ -607,11 +663,29 @@ def main():
             [c for c in df.columns if "Cross_" in c] +
             [c for c in df.columns if "PPI" in c and "lag" in c] +
             [c for c in df.columns if "VIX" in c] +
+            [c for c in df.columns if "OVX" in c] +
+            [c for c in df.columns if "GLD" in c or "GDX" in c or "GSR" in c] +
+            [c for c in df.columns if "Oil_" in c] +
+            [c for c in df.columns if "CPI_Accel" in c] +
+            asset_extra.get(asset_name, []) +
             regime_cols + dummy_cols
         ))
-        feat_cols = [c for c in feat_cols if c in df.columns and c != target_col]
+        feat_cols = [c for c in feat_cols
+                     if c in df.columns
+                     and c != target_col
+                     and "6m_Dir"    not in c   # 선행 방향 변수 제외
+                     and "3m_Dir"    not in c
+                     and "Accel_Dir" not in c
+                     # ★ v8: CPI 누수 방지 — 비시차 가속도 제외
+                     and c not in ["CPI_Accel","CPI_YoY_Series",
+                                   "Gold_6m_Fwd","WTI_3m_Fwd"]]
 
-        data = df[[target_col]+feat_cols].dropna()
+        # ★ v8: 분류 목표 변수 (이진) 확인
+        is_binary_target = target_col in ["Gold_6m_Dir","WTI_3m_Dir","CPI_Accel_Dir"]
+
+        # 필요한 컬럼: 피처 + 목표
+        needed = [target_col] + feat_cols
+        data = df[needed].dropna()
         if len(data) < C.MIN_TRAIN + 30:
             print(f"  데이터 부족 ({len(data)}개)"); continue
 
@@ -628,31 +702,84 @@ def main():
         X_tr_s  = pd.DataFrame(sx.fit_transform(X_tr), columns=feat_cols, index=X_tr.index)
         X_val_s = pd.DataFrame(sx.transform(X_val), columns=feat_cols, index=X_val.index)
         X_te_s  = pd.DataFrame(sx.transform(X_te), columns=feat_cols, index=X_te.index)
-        y_tr_s  = sy.fit_transform(y_tr.values.reshape(-1,1)).flatten()
-        y_val_s = sy.transform(y_val.values.reshape(-1,1)).flatten()
+
+        # ★ v8: 이진 목표 변수 처리
+        if is_binary_target:
+            # 이진 목표 → 스케일링 불필요, 원본 사용
+            y_tr_s  = y_tr.values.astype(int)
+            y_val_s = y_val.values.astype(int)
+            # 클래스 불균형 계산
+            pos_ratio = y_tr_s.mean()
+            neg_ratio = 1 - pos_ratio
+            class_weight = neg_ratio / (pos_ratio + 1e-8)
+            print(f"  클래스 비율 — 상승:{pos_ratio:.1%} / 하락:{neg_ratio:.1%}")
+            if abs(pos_ratio - 0.5) > 0.2:
+                print(f"  ⚠️  불균형 감지 → scale_pos_weight={class_weight:.2f} 적용")
+        else:
+            y_tr_s  = sy.fit_transform(y_tr.values.reshape(-1,1)).flatten()
+            y_val_s = sy.transform(y_val.values.reshape(-1,1)).flatten()
+            class_weight = 1.0
 
         top   = select_features_granger_priority(X_tr_s, y_tr_s, asset_name)
         Xtr_s = X_tr_s[top]; Xval_s = X_val_s[top]; Xte_s = X_te_s[top]
 
-        best_p = optuna_tune(Xtr_s, y_tr_s, Xval_s, y_val_s)
+        best_p = optuna_tune(Xtr_s, y_tr_s, Xval_s, y_val_s) if not is_binary_target else None
 
-        print(f"\n  XGBoost 회귀")
-        xgb_reg = train_xgb_reg(Xtr_s, y_tr_s, Xval_s, y_val_s, best_p)
-        xgb_pred = sy.inverse_transform(xgb_reg.predict(Xte_s).reshape(-1,1)).flatten()
-        m = compute_metrics(y_te.values, xgb_pred)
-        print_metrics(m, f"{asset_name} - XGBoost 회귀")
-        all_metrics[f"{asset_name}_XGB_Reg"] = m
+        if is_binary_target:
+            # ★ v8: 이진 목표 → 분류기만 직접 학습 (회귀 불필요)
+            print(f"\n  XGBoost 분류기 (이진 목표)")
+            xgb_clf_direct = xgb.XGBClassifier(
+                n_estimators=500, max_depth=5, learning_rate=0.03,
+                early_stopping_rounds=30, eval_metric="logloss",
+                random_state=42, verbosity=0, n_jobs=-1,
+                use_label_encoder=False,
+                scale_pos_weight=class_weight)
+            xgb_clf_direct.fit(Xtr_s, y_tr_s,
+                               eval_set=[(Xval_s, y_val_s)], verbose=False)
+            xgb_dir_pred = xgb_clf_direct.predict(Xte_s)
+            xgb_dir_acc = accuracy_score(y_te.values.astype(int), xgb_dir_pred)*100
+            print(f"  XGB 분류 정확도: {xgb_dir_acc:.1f}%")
+            all_metrics[f"{asset_name}_XGB_Reg"] = {
+                "Dir_Acc":xgb_dir_acc,"MAE":0,"RMSE":0,"sMAPE":0,"R2":0}
 
-        print(f"\n  LightGBM 회귀")
-        lgb_reg = train_lgb_reg(Xtr_s, y_tr_s, Xval_s, y_val_s)
-        lgb_pred = sy.inverse_transform(lgb_reg.predict(Xte_s).reshape(-1,1)).flatten()
-        m = compute_metrics(y_te.values, lgb_pred)
-        print_metrics(m, f"{asset_name} - LightGBM 회귀")
-        all_metrics[f"{asset_name}_LGB_Reg"] = m
+            print(f"\n  LightGBM 분류기 (이진 목표)")
+            lgb_clf_direct = lgb.LGBMClassifier(
+                n_estimators=500, max_depth=5, learning_rate=0.03,
+                random_state=42, n_jobs=-1, verbose=-1,
+                class_weight="balanced")
+            lgb_clf_direct.fit(Xtr_s, y_tr_s,
+                               eval_set=[(Xval_s, y_val_s)],
+                               callbacks=[lgb.early_stopping(30,verbose=False),
+                                          lgb.log_evaluation(period=9999)])
+            lgb_dir_pred = lgb_clf_direct.predict(Xte_s)
+            lgb_dir_acc = accuracy_score(y_te.values.astype(int), lgb_dir_pred)*100
+            print(f"  LGB 분류 정확도: {lgb_dir_acc:.1f}%")
+            all_metrics[f"{asset_name}_LGB_Reg"] = {
+                "Dir_Acc":lgb_dir_acc,"MAE":0,"RMSE":0,"sMAPE":0,"R2":0}
+            xgb_reg = xgb_clf_direct  # SHAP용
+        else:
+            print(f"\n  XGBoost 회귀")
+            xgb_reg = train_xgb_reg(Xtr_s, y_tr_s, Xval_s, y_val_s, best_p)
+            xgb_pred = sy.inverse_transform(xgb_reg.predict(Xte_s).reshape(-1,1)).flatten()
+            m = compute_metrics(y_te.values, xgb_pred)
+            print_metrics(m, f"{asset_name} - XGBoost 회귀")
+            all_metrics[f"{asset_name}_XGB_Reg"] = m
+
+            print(f"\n  LightGBM 회귀")
+            lgb_reg = train_lgb_reg(Xtr_s, y_tr_s, Xval_s, y_val_s)
+            lgb_pred = sy.inverse_transform(lgb_reg.predict(Xte_s).reshape(-1,1)).flatten()
+            m = compute_metrics(y_te.values, lgb_pred)
+            print_metrics(m, f"{asset_name} - LightGBM 회귀")
+            all_metrics[f"{asset_name}_LGB_Reg"] = m
 
         # Walk-forward 기반 모델 선택 + 임계값 최적화
+        X_tr_raw = X_tr[top]
+        if is_binary_target:
+            y_tr_raw = y_tr.astype(int)   # 이진 목표
+        else:
+            y_tr_raw = y_tr
         selected_type, best_thresh, xgb_wf, lgb_wf = walk_forward_select(
-            Xtr_s, pd.Series(y_tr_s, index=Xtr_s.index), asset_name)
+            X_tr_raw, y_tr_raw, asset_name)
 
         # 선택된 모델로 최종 분류기 학습
         if selected_type == "LGB":
@@ -662,7 +789,11 @@ def main():
 
         # 테스트 예측
         te_probs    = final_clf.predict_proba(Xte_s)[:,1]
-        te_dir_true = make_direction_labels(y_te.values)
+        # ★ v8: 이진 목표는 이미 0/1, 연속 목표는 방향 변환
+        if is_binary_target:
+            te_dir_true = y_te.values.astype(int)
+        else:
+            te_dir_true = make_direction_labels(y_te.values)
         te_dir_pred = (te_probs > best_thresh).astype(int)
         final_acc   = accuracy_score(te_dir_true, te_dir_pred) * 100
         acc_05      = accuracy_score(te_dir_true, (te_probs>0.5).astype(int)) * 100
@@ -686,13 +817,18 @@ def main():
         all_metrics[f"{asset_name}_Final_Clf"] = {
             "Dir_Acc":final_acc,"MAE":0,"RMSE":0,"sMAPE":0,"R2":0}
 
-        reg_abs = np.abs(sy.inverse_transform(xgb_reg.predict(Xte_s).reshape(-1,1)).flatten())
-        conf = np.abs(te_probs-0.5)*2
-        sign = np.where(te_probs>best_thresh, 1, -1)
-        final_pred = reg_abs*(0.3+0.7*conf)*sign
-        m = compute_metrics(y_te.values, final_pred)
-        m["Dir_Acc"] = final_acc
-        print_metrics(m, f"{asset_name} - v7 Final")
+        if is_binary_target:
+            # 이진 목표: 분류 정확도만 보고
+            m = {"MAE":0,"RMSE":0,"sMAPE":0,"R2":0,"Dir_Acc":final_acc}
+            print(f"\n  ★ {asset_name} 분류 정확도: {final_acc:.1f}%")
+        else:
+            reg_abs = np.abs(sy.inverse_transform(xgb_reg.predict(Xte_s).reshape(-1,1)).flatten())
+            conf = np.abs(te_probs-0.5)*2
+            sign = np.where(te_probs>best_thresh, 1, -1)
+            final_pred = reg_abs*(0.3+0.7*conf)*sign
+            m = compute_metrics(y_te.values, final_pred)
+            m["Dir_Acc"] = final_acc
+            print_metrics(m, f"{asset_name} - v8 Final")
         all_metrics[f"{asset_name}_Final"] = m
 
         try:
@@ -702,7 +838,7 @@ def main():
 
         print(f"\n  Walk-forward 백테스트: {asset_name}")
         bt = walk_forward_backtest(
-            Xtr_s, pd.Series(y_tr_s, index=Xtr_s.index),
+            X_tr_raw, y_tr_raw,
             selected_type, best_thresh,
             asset_name=asset_name)
         plot_backtest(bt, asset_name, best_thresh)
