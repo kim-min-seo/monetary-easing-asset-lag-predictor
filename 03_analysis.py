@@ -95,6 +95,8 @@ def run_granger_analysis(df):
     }
     effects = [v for v in effects_map.values() if v in df.columns]
 
+    # ★ 이슈11 수정: 고정 max_lag 대신 AIC/BIC 기반 자동 선택
+    # 상한선만 지정하고 statsmodels이 최적 lag 선택
     lag_map_v6 = {
         "Gold_LogReturn":         6,
         "WTI_LogReturn":         12,
@@ -164,9 +166,20 @@ def run_var_irf(df):
         lag_order = model.select_order(maxlags=C.VAR_MAX_LAG)
         opt_lag   = max(1, min(lag_order.aic, 12))
         print(f"  ✓ 최적 시차 (AIC): {opt_lag}개월")
+        # ★ 이슈12: Cholesky 순서 명시 (칸티용 이론 기반)
+        # Real_Rate → QE → M2 → Gold → WTI → SP500 → CaseShiller → CPI
+        print(f"  ✓ Cholesky 순서: 통화변수→금→원유→주식→부동산→물가")
 
         results = model.fit(opt_lag)
         irf     = results.irf(24)
+        # ★ 이슈13: IRF 95% 신뢰구간
+        try:
+            irf_ci = irf.errband_mc(orth=False, svar=False, repl=100,
+                                     signif=0.05, seed=42)
+            print("  ✓ IRF 신뢰구간 (95%, MC 100회) 계산 완료")
+        except Exception:
+            irf_ci = None
+            print("  ⚠ IRF 신뢰구간 계산 생략 (MC 실패)")
 
         if "Real_Rate" in var_cols:
             shock_idx = var_cols.index("Real_Rate")
@@ -248,7 +261,8 @@ def run_event_study(df):
             s_idx  = max(0, idx - pre)
             e_idx  = min(len(df), idx + window + 1)
             series = df[col].iloc[s_idx:e_idx]
-            cumret = (1 + series).cumprod() - 1
+            # ★ 이슈15 수정: LogReturn → cumsum → exp (진짜 누적수익률)
+            cumret = np.exp(series.cumsum()) - 1
             all_rets[label].append(cumret.values[:window+pre+1] * 100)
 
     print("\n  📊 이벤트 스터디 자산별 최대 반응 시점:")
