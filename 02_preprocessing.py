@@ -28,8 +28,7 @@ import config as C
 def basic_preprocess(df):
     print("\n  [2-1] 기본 전처리")
     df = df.interpolate(method="linear",
-                        limit_direction="both").ffill().bfill()
-
+                    limit_direction="forward").ffill()
     new_cols = {}
     price_cols = ["Gold", "WTI", "SP500", "CaseShiller", "CPI"]
     for col in price_cols:
@@ -272,18 +271,6 @@ def add_qvar_regime_features(df):
             )
         print("  ✓ 과열기 M2→CaseShiller 경로 피처 생성")
 
-    # ────────────────────────────────────────
-    # TCI (Total Connectedness Index) 근사
-    # 국면별 시장 전체 연결성 지수
-    # 침체기: 28.81%, 중립기: 20.82%, 과열기: 29.82%
-    # ────────────────────────────────────────
-    if "Regime_Recession" in new_cols:
-        new_cols["TCI_Approx"] = (
-            new_cols["Regime_Recession"]   * 28.81 +
-            new_cols["Regime_Neutral"]     * 20.82 +
-            new_cols["Regime_Overheating"] * 29.82
-        )
-        print("  ✓ TCI 근사값 피처 생성")
 
     df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
     return df
