@@ -32,7 +32,7 @@ def basic_preprocess(df):
     new_cols = {}
     price_cols = ["Gold", "WTI", "SP500", "CaseShiller", "CPI"]
     for col in price_cols:
-        if col in df.columns and (df[col] > 0).all():
+        if col in df.columns and (df[col].dropna() > 0).all():
             new_cols[f"{col}_LogReturn"] = np.log(df[col] / df[col].shift(1))
             new_cols[f"{col}_YoY"]       = df[col].pct_change(12) * 100
 
