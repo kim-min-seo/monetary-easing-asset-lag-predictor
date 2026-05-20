@@ -1,9 +1,24 @@
 # ============================================================
-#  03_analysis.py — 실증 분석 (v6)
-#  ★ v6 개선:
-#  1. CaseShiller_LogReturn2 (2차 차분) 사용
-#  2. TIPS_Spread → Gold 유의성 확보
-#  3. WTI 중복 버그 수정
+#  03_analysis.py — 실증 분석 (v8 — PHASE C1 + C2)
+#
+#  v8 변경 사항:
+#  ─────────────────────────────────────────────────────────
+#  [C1] Granger 인과분석: best_lag p-해킹 제거
+#       - 기존: maxlag까지 모든 시차의 p값 계산 후 가장 작은 p값의
+#               시차를 "best_lag"로 보고 → 시차 선택과 검정 통계량이
+#               같은 데이터에서 나와 p값이 인위적으로 부풀려짐 (p-hacking)
+#       - 수정: 양변량 VAR로 AIC 최적 시차를 먼저 결정한 후, 그 단일
+#               시차에서만 그랜저 검정 실시. 시차 선택과 검정 분리.
+#
+#  [C2] VAR 적분차수 통일: CaseShiller_LogReturn2 → CaseShiller_LogReturn
+#       - 기존: CaseShiller만 2차 차분(_LogReturn2), 다른 자산은 1차 차분
+#               (_LogReturn) → VAR 변수들의 경제적 의미가 불일치
+#               ("월간 수익률" vs "월간 수익률의 변화량") → IRF 해석의
+#               자산 간 비교가 사실상 불가능
+#       - 수정: 모든 자산을 _LogReturn (1차 차분)으로 통일. ADF 사전
+#               확인을 추가하여 비정상 변수가 포함되었을 때 명시적으로
+#               경고하고 한계로 보고. CaseShiller의 약한 정상성은
+#               논문 한계 섹션에서 다룸.
 # ============================================================
 
 import pandas as pd
@@ -66,40 +81,43 @@ def run_adf_test(df):
 
 
 # ──────────────────────────────────────────────
-#  그랜저 인과관계 분석
+#  그랜저 인과관계 분석  (★ C1: p-해킹 제거)
 # ──────────────────────────────────────────────
 
 def run_granger_analysis(df):
     """
-    ★ v6 개선:
-    - CaseShiller_LogReturn2 (2차 차분) 사용 → 정상성 확보
-    - TIPS_Spread 독립변수 추가 → Gold 유의성 확보
+    ★ C1: best_lag 선택 방식 변경
+       - 기존: maxlag까지 검정 후 가장 작은 p값의 시차를 best_lag로 선정
+       - 변경: 양변량 VAR의 AIC로 시차 선택 후 그 단일 시차에서만 검정
+
+    ★ C2: CaseShiller_LogReturn (1차 차분) 사용 → 다른 자산과 적분차수 통일
     """
-    print("\n  [3-2] 그랜저 인과관계 분석")
-    print("  ★ v6: CaseShiller 2차 차분 + TIPS 스프레드 추가")
+    print("\n  [3-2] 그랜저 인과관계 분석 (v8: AIC 시차 선택 + 적분차수 통일)")
 
     causes = [c for c in [
         "FedRate_Change", "Real_Rate", "QE_Size", "DXY_Change",
-        "M2_YoY", "TIPS_Spread",          # ★ v6: TIPS 추가
-        "Inflation_Expect",                # ★ v6: 기대인플레이션 추가
+        "M2_YoY", "TIPS_Spread", "Inflation_Expect",
         "Monetary_Ease_Index"
     ] if c in df.columns]
 
-    # ★ v6: CaseShiller는 2차 차분 버전 사용
+    # ★ C2: CaseShiller_LogReturn (1차 차분) 사용
     effects_map = {
-        "Gold_LogReturn":         "Gold_LogReturn",
-        "WTI_LogReturn":          "WTI_LogReturn",
-        "SP500_LogReturn":        "SP500_LogReturn",
-        "CaseShiller_LogReturn2": "CaseShiller_LogReturn2",  # 2차 차분
-        "CPI_LogReturn":          "CPI_LogReturn",
+        "Gold_LogReturn":        "Gold_LogReturn",
+        "WTI_LogReturn":         "WTI_LogReturn",
+        "SP500_LogReturn":       "SP500_LogReturn",
+        "CaseShiller_LogReturn": "CaseShiller_LogReturn",
+        "CPI_LogReturn":         "CPI_LogReturn",
     }
     effects = [v for v in effects_map.values() if v in df.columns]
 
-    lag_map_v6 = {
-        "Gold_LogReturn":         6,
+    # 자산별 max_lag (AIC 탐색의 상한선)
+    # - 빠른 시장 반응 자산은 짧게 (Gold, WTI, SP500)
+    # - 느리게 반응하는 거시 자산은 길게 (CaseShiller, CPI)
+    max_lag_map = {
+        "Gold_LogReturn":        12,
         "WTI_LogReturn":         12,
         "SP500_LogReturn":       12,
-        "CaseShiller_LogReturn2":24,   # 2차 차분
+        "CaseShiller_LogReturn": 24,
         "CPI_LogReturn":         24,
     }
 
@@ -110,23 +128,32 @@ def run_granger_analysis(df):
     for cause in causes:
         for effect in effects:
             try:
-                this_lag = lag_map_v6.get(effect, 24)
+                this_max = max_lag_map.get(effect, 24)
                 data     = df[[cause, effect]].dropna()
-                if len(data) < this_lag + 5:
+                if len(data) < this_max + 10:
                     continue
-                res = grangercausalitytests(
-                    data, maxlag=this_lag, verbose=False)
-                best_lag = min(res,
-                               key=lambda l: res[l][0]["ssr_ftest"][1])
-                pval     = res[best_lag][0]["ssr_ftest"][1]
-                sig      = "✓" if pval < 0.05 else "✗"
-                print(f"  {sig} {cause:22s} → {effect:28s} "
-                      f"시차={best_lag:2d}개월  p={pval:.4f}")
-                lag_t.loc[cause, effect]  = best_lag
+
+                # ★ C1: 양변량 VAR AIC로 시차 선택 (p-해킹 방지)
+                try:
+                    bv_model = VAR(data)
+                    sel      = bv_model.select_order(maxlags=this_max)
+                    aic_lag  = int(max(1, min(sel.aic, this_max)))
+                except Exception:
+                    # AIC 선택 실패 시 보수적 기본값 (월간 데이터 표준)
+                    aic_lag = min(6, this_max)
+
+                # 선택된 단일 시차에서 그랜저 검정
+                res  = grangercausalitytests(data, maxlag=aic_lag, verbose=False)
+                pval = res[aic_lag][0]["ssr_ftest"][1]
+                sig  = "✓" if pval < 0.05 else "✗"
+                print(f"  {sig} {cause:22s} → {effect:25s} "
+                      f"AIC시차={aic_lag:2d}개월  p={pval:.4f}")
+
+                lag_t.loc[cause, effect]  = aic_lag
                 pval_t.loc[cause, effect] = pval
                 rows.append({"cause": cause, "effect": effect,
-                             "best_lag": best_lag, "p_value": pval,
-                             "max_lag": this_lag,
+                             "lag": aic_lag, "p_value": pval,
+                             "max_lag": this_max,
                              "significant": pval < 0.05})
             except Exception:
                 pass
@@ -135,50 +162,79 @@ def run_granger_analysis(df):
     if not result_df.empty:
         path = os.path.join(C.RESULT_DIR, "granger_results.csv")
         result_df.to_csv(path, index=False)
-        print(f"  ✓ 저장: {path}")
+        print(f"\n  ✓ 저장: {path}")
+
+        # 유의 결과 요약
+        n_sig = result_df["significant"].sum()
+        print(f"  ✓ 유의 관계 (p<0.05): {n_sig}/{len(result_df)}개")
 
     return result_df, lag_t, pval_t
 
 
 # ──────────────────────────────────────────────
-#  VAR + IRF
+#  VAR + IRF  (★ C2: 적분차수 통일)
 # ──────────────────────────────────────────────
 
 def run_var_irf(df):
-    print("\n  [3-3] VAR + IRF 충격반응함수 분석")
+    """
+    ★ C2: CaseShiller_LogReturn (1차 차분) 사용
+       - 다른 자산(_LogReturn)과 적분차수 통일
+       - ADF 사전 확인 후 비정상 변수가 있으면 경고 출력
+    """
+    print("\n  [3-3] VAR + IRF 충격반응함수 분석 (v8: 적분차수 통일)")
 
-    # ★ v6: CaseShiller 2차 차분 + TIPS 추가
+    # ★ C2: CaseShiller_LogReturn (1차 차분) — 다른 자산과 단위 일치
     var_cols = [c for c in [
         "Real_Rate", "QE_Size", "M2_YoY", "TIPS_Spread",
         "Gold_LogReturn", "WTI_LogReturn",
-        "SP500_LogReturn", "CaseShiller_LogReturn2",
+        "SP500_LogReturn", "CaseShiller_LogReturn",
         "CPI_LogReturn"
     ] if c in df.columns]
 
     data = df[var_cols].dropna()
     print(f"  VAR 데이터: {data.shape[0]}개월 × {data.shape[1]}개 변수")
 
+    # ★ C2: ADF 사전 확인 — 비정상 변수가 있으면 명시적으로 경고
+    print("\n  [ADF 사전 확인 — VAR 변수들의 정상성]")
+    non_stat = []
+    for col in var_cols:
+        try:
+            _, p_val, *_ = adfuller(data[col].dropna(), autolag="AIC")
+            mark = "✓" if p_val < 0.05 else "✗"
+            print(f"    {mark} {col:28s} p={p_val:.4f}")
+            if p_val >= 0.05:
+                non_stat.append(col)
+        except Exception:
+            pass
+
+    if non_stat:
+        print(f"\n  ⚠️  비정상 변수 {len(non_stat)}개 포함됨: {non_stat}")
+        print(f"      → IRF 해석 시 이 한계 고려 필요 (논문 한계 섹션 명시)")
+    else:
+        print(f"\n  ✓ 모든 VAR 변수 정상 (I(0))")
+
     irf_results = {}
     try:
         model     = VAR(data)
         lag_order = model.select_order(maxlags=C.VAR_MAX_LAG)
         opt_lag   = max(1, min(lag_order.aic, 12))
-        print(f"  ✓ 최적 시차 (AIC): {opt_lag}개월")
+        print(f"\n  ✓ VAR 최적 시차 (AIC): {opt_lag}개월")
 
         results = model.fit(opt_lag)
         irf     = results.irf(24)
 
         if "Real_Rate" in var_cols:
             shock_idx = var_cols.index("Real_Rate")
+            # ★ C2: CaseShiller_LogReturn 로 매핑 통일
             asset_map = {
-                "Gold_LogReturn":         "금 (Gold)",
-                "WTI_LogReturn":          "WTI 원유",
-                "SP500_LogReturn":        "S&P500",
-                "CaseShiller_LogReturn2": "부동산",
-                "CPI_LogReturn":          "CPI",
+                "Gold_LogReturn":        "금 (Gold)",
+                "WTI_LogReturn":         "WTI 원유",
+                "SP500_LogReturn":       "S&P500",
+                "CaseShiller_LogReturn": "부동산",
+                "CPI_LogReturn":         "CPI",
             }
 
-            print("\n  📊 IRF 기반 자산별 최대 반응 시점:")
+            print("\n  📊 IRF 기반 자산별 최대 반응 시점 (Real_Rate 충격):")
             for col, label in asset_map.items():
                 if col not in var_cols:
                     continue
@@ -214,7 +270,7 @@ def run_var_irf(df):
 
 
 # ──────────────────────────────────────────────
-#  이벤트 스터디
+#  이벤트 스터디  (PHASE C에서는 미변경, C4에서 수정 예정)
 # ──────────────────────────────────────────────
 
 def run_event_study(df):
@@ -222,9 +278,9 @@ def run_event_study(df):
 
     asset_cols = {
         "금 (Gold)":  "Gold_LogReturn",
-        "WTI (원유)": "WTI_LogReturn",
+        "WTI 원유":   "WTI_LogReturn",
         "S&P500":     "SP500_LogReturn",
-        "부동산":      "CaseShiller_LogReturn",  # 원본 유지 (시각화용)
+        "부동산":      "CaseShiller_LogReturn",
         "CPI":        "CPI_LogReturn",
     }
 
@@ -276,51 +332,45 @@ def run_event_study(df):
 
 
 # ──────────────────────────────────────────────
-#  칸티용 전이 순서 자동 도출
+#  칸티용 전이 순서 자동 도출  (★ C2: 매핑 단순화)
 # ──────────────────────────────────────────────
 
 def derive_cantillon_order(granger_df, irf_results, event_peaks):
     """
-    ★ v6 버그 수정:
-    WTI 원유 / WTI(원유) 중복 제거
-    asset_labels 기준으로 통일
+    ★ v8 변경:
+    - C2: CaseShiller_LogReturn 단일 사용 → 이전의 _LogReturn / _LogReturn2
+          이중 매핑 제거. asset_labels 깔끔하게 1:1
+    - C1 후속: best_lag → lag 컬럼명 변경 반영
     """
     print("\n  [3-5] 칸티용 전이 순서 자동 도출")
 
-    # ★ v6: CaseShiller_LogReturn2 → 부동산으로 표시
+    # ★ v8: CaseShiller_LogReturn 단일 사용 (이전 이중 매핑 제거)
     asset_labels = {
-        "Gold_LogReturn":         "금 (Gold)",
-        "WTI_LogReturn":          "WTI 원유",
-        "SP500_LogReturn":        "S&P500",
-        "CaseShiller_LogReturn2": "부동산",
-        "CaseShiller_LogReturn":  "부동산",  # 둘 다 매핑
-        "CPI_LogReturn":          "CPI",
+        "Gold_LogReturn":        "금 (Gold)",
+        "WTI_LogReturn":         "WTI 원유",
+        "SP500_LogReturn":       "S&P500",
+        "CaseShiller_LogReturn": "부동산",
+        "CPI_LogReturn":         "CPI",
     }
 
     order_scores = {}
 
-    # 그랜저 기반
+    # 그랜저 기반 — 유의 결과만 사용
     if not granger_df.empty:
         sig_df = granger_df[granger_df["significant"]]
         for effect, label in asset_labels.items():
-            lags = sig_df[sig_df["effect"] == effect]["best_lag"]
+            lags = sig_df[sig_df["effect"] == effect]["lag"]
             if len(lags) > 0:
                 if label not in order_scores:
                     order_scores[label] = {}
-                existing = order_scores[label].get("granger_lag")
-                new_val  = lags.mean()
-                # 같은 자산 중복이면 더 작은 시차 사용
-                order_scores[label]["granger_lag"] = (
-                    min(existing, new_val) if existing else new_val
-                )
+                order_scores[label]["granger_lag"] = lags.mean()
 
     # IRF 기반
     for col, info in irf_results.items():
         label = asset_labels.get(col, col)
         if label not in order_scores:
             order_scores[label] = {}
-        if "irf_lag" not in order_scores[label]:
-            order_scores[label]["irf_lag"] = info["peak_month"]
+        order_scores[label]["irf_lag"] = info["peak_month"]
 
     # 이벤트 스터디 기반
     for label, month in event_peaks.items():
@@ -332,13 +382,7 @@ def derive_cantillon_order(granger_df, irf_results, event_peaks):
     print("  " + "-" * 55)
 
     final_order = []
-    seen_labels = set()  # ★ v6: 중복 제거
-
     for label, scores in order_scores.items():
-        if label in seen_labels:
-            continue
-        seen_labels.add(label)
-
         lags = [v for v in scores.values() if v is not None]
         avg  = np.mean(lags) if lags else 999
         g = f"{scores.get('granger_lag', ''):>8}"
@@ -376,7 +420,7 @@ def derive_cantillon_order(granger_df, irf_results, event_peaks):
 # ──────────────────────────────────────────────
 
 def main():
-    print("\n[03] 실증 분석")
+    print("\n[03] 실증 분석 (v8: PHASE C1 + C2)")
 
     proc_path = os.path.join(C.DATA_PROC_DIR, "processed_data.csv")
     if not os.path.exists(proc_path):
@@ -393,7 +437,7 @@ def main():
     final_order = derive_cantillon_order(
         granger_df, irf_results, event_peaks)
 
-    print("\n  ✅ 실증 분석 완료")
+    print("\n  ✅ 실증 분석 완료 (v8 C1+C2)")
     return {
         "adf":        adf_results,
         "granger":    granger_df,
