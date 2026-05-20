@@ -1,8 +1,24 @@
 # ============================================================
-#  04_visualization.py — 시각화 (v6)
-#  ★ v6 개선:
-#  1. from 03_analysis import 버그 수정 (importlib 방식)
-#  2. 사이클별 개별 이벤트 스터디 차트 추가
+#  04_visualization.py — 시각화 (v8 — PHASE C6 + C1/C2/C4/C5 동기화)
+#
+#  v8 변경 사항:
+#  ─────────────────────────────────────────────────────────
+#  [C6] IRF 차트에 95% 신뢰구간 밴드 추가
+#       - 기존: IRF 점 추정치(점선)만 표시 → 통계적 유의성 판단 불가
+#       - 수정: errband_mc 부트스트랩(500회)으로 95% CI 산출 후
+#               steelblue 음영으로 시각화. CI가 0을 포함하면 비유의.
+#
+#  [C2 동기화] plot_irf의 var_cols / asset_map 에서
+#              CaseShiller_LogReturn2 → CaseShiller_LogReturn
+#
+#  [C1 동기화] main()의 그랜저 피벗 컬럼명 best_lag → lag
+#
+#  [C4 동기화] plot_event_study의 사이클별 차트도
+#              (1+r).cumprod() → exp(cumsum()) 로 수정
+#              (사후 차트도 이벤트 시점 baseline 적용)
+#
+#  [C5 동기화] cantillon_order.csv가 다중 컬럼 구조로 변경됨에 따라
+#              main()에서 asset + avg_rank 컬럼만 선택하여 사용
 # ============================================================
 
 import pandas as pd
@@ -30,7 +46,6 @@ def set_font():
 
 
 def load_analysis_module():
-    """★ v6 버그 수정: importlib로 03_analysis 로드"""
     spec = importlib.util.spec_from_file_location(
         "analysis",
         os.path.join(os.path.dirname(__file__), "03_analysis.py")
@@ -52,10 +67,10 @@ def plot_granger_heatmap(lag_t, pval_t):
     fig, axes = plt.subplots(1, 2, figsize=(22, 7))
     sns.heatmap(lag_t.astype(float), annot=True, fmt=".0f",
                 cmap="YlOrRd", ax=axes[0],
-                cbar_kws={"label": "최적 시차(월)"})
+                cbar_kws={"label": "AIC 시차(월)"})
     axes[0].set_title(
-        "그랜저 인과관계 최적 시차\n"
-        "(v6: CaseShiller 2차 차분 + TIPS 스프레드)",
+        "그랜저 인과관계 AIC 시차\n"
+        "(v8: AIC 시차 선택 + CaseShiller 1차 차분)",
         fontsize=13, fontweight="bold")
 
     sns.heatmap(pval_t.astype(float), annot=True, fmt=".3f",
@@ -73,7 +88,7 @@ def plot_granger_heatmap(lag_t, pval_t):
 
 
 # ──────────────────────────────────────────────
-#  IRF 차트
+#  IRF 차트  (★ C6: 95% CI 밴드 추가)
 # ──────────────────────────────────────────────
 
 def plot_irf(df, irf_obj, irf_results):
@@ -82,10 +97,12 @@ def plot_irf(df, irf_obj, irf_results):
         return
 
     set_font()
+
+    # ★ C2 동기화: CaseShiller_LogReturn 사용
     var_cols = [c for c in [
         "Real_Rate", "QE_Size", "M2_YoY", "TIPS_Spread",
         "Gold_LogReturn", "WTI_LogReturn",
-        "SP500_LogReturn", "CaseShiller_LogReturn2",
+        "SP500_LogReturn", "CaseShiller_LogReturn",
         "CPI_LogReturn"
     ] if c in df.columns]
 
@@ -94,13 +111,26 @@ def plot_irf(df, irf_obj, irf_results):
 
     shock_idx = var_cols.index("Real_Rate")
     asset_map = {
-        "Gold_LogReturn":         "금 (Gold)",
-        "WTI_LogReturn":          "WTI 원유",
-        "SP500_LogReturn":        "S&P500",
-        "CaseShiller_LogReturn2": "부동산",
-        "CPI_LogReturn":          "CPI",
+        "Gold_LogReturn":        "금 (Gold)",
+        "WTI_LogReturn":         "WTI 원유",
+        "SP500_LogReturn":       "S&P500",
+        "CaseShiller_LogReturn": "부동산",
+        "CPI_LogReturn":         "CPI",
     }
     assets_in = [(c, l) for c, l in asset_map.items() if c in var_cols]
+
+    # ★ C6: 95% 신뢰구간 산출 (부트스트랩 Monte Carlo, 500회)
+    has_ci = False
+    irf_lower = irf_upper = None
+    try:
+        print("  [C6] IRF 신뢰구간 부트스트랩 산출 중 (500회)...")
+        irf_lower, irf_upper = irf_obj.errband_mc(
+            orth=True, repl=500, signif=0.05, seed=42)
+        has_ci = True
+        print("  ✓ 신뢰구간 산출 완료")
+    except Exception as e:
+        print(f"  ⚠️  신뢰구간 산출 실패: {e}")
+        print("      → 점 추정치만 표시")
 
     fig, axes = plt.subplots(len(assets_in), 1,
                              figsize=(14, 4*len(assets_in)),
@@ -112,20 +142,40 @@ def plot_irf(df, irf_obj, irf_results):
         resp_idx = var_cols.index(col)
         irf_vals = irf_obj.irfs[:, resp_idx, shock_idx]
         peak_m   = int(np.argmax(np.abs(irf_vals)))
+        horizons = list(range(len(irf_vals)))
 
-        ax.plot(range(len(irf_vals)), irf_vals,
+        # ★ C6: 신뢰구간 밴드 (있을 때만)
+        if has_ci:
+            lo = irf_lower[:, resp_idx, shock_idx]
+            hi = irf_upper[:, resp_idx, shock_idx]
+            ax.fill_between(horizons, lo, hi,
+                            alpha=0.25, color="steelblue",
+                            label="95% CI (부트스트랩)")
+            # 0을 포함하지 않는 구간 표시 (유의 구간)
+            sig_mask = (lo > 0) | (hi < 0)
+            if sig_mask.any():
+                # 유의한 horizon 위치에 작은 마커
+                sig_h = [h for h, m in zip(horizons, sig_mask) if m]
+                sig_v = [irf_vals[h] for h in sig_h]
+                ax.scatter(sig_h, sig_v, color="darkred",
+                           s=18, zorder=5,
+                           label="유의 (CI가 0 미포함)")
+
+        ax.plot(horizons, irf_vals,
                 color="steelblue", lw=2.5, label=label)
         ax.axhline(0, color="black", lw=1, ls="--")
-        ax.axvline(peak_m, color="red", lw=1.5, ls=":", alpha=0.7)
+        ax.axvline(peak_m, color="red", lw=1.5, ls=":", alpha=0.7,
+                   label=f"최대 반응 {peak_m}개월")
         ax.set_ylabel(label); ax.grid(True, alpha=0.3)
         ax.set_title(f"{label} — 최대 반응: {peak_m}개월 후",
                      fontsize=10, fontweight="bold")
+        ax.legend(loc="best", fontsize=8)
 
     axes[-1].set_xlabel("실질금리 충격 후 경과 개월")
     fig.suptitle(
-        "IRF 충격반응함수: 실질금리 하락 → 각 자산 반응 (v6)\n"
-        "빨간 점선: 최대 반응 시점",
-        fontsize=13, fontweight="bold", y=1.01)
+        "IRF 충격반응함수: 실질금리 상승 → 각 자산 반응 (v8)\n"
+        "음영: 95% 부트스트랩 CI · 빨간 점: 0을 포함하지 않는 유의 구간",
+        fontsize=12, fontweight="bold", y=1.01)
     plt.tight_layout()
     path = os.path.join(C.FIG_DIR, "irf_realrate.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
@@ -134,7 +184,7 @@ def plot_irf(df, irf_obj, irf_results):
 
 
 # ──────────────────────────────────────────────
-#  이벤트 스터디 (★ v6: 사이클별 차트 추가)
+#  이벤트 스터디  (★ C4 동기화)
 # ──────────────────────────────────────────────
 
 def plot_event_study(df, all_rets):
@@ -146,7 +196,7 @@ def plot_event_study(df, all_rets):
     labels = list(all_rets.keys())
     pre    = 6
 
-    # 전체 평균 차트
+    # 전체 평균 차트 (all_rets은 03의 C4 적용된 값이라 그대로 사용)
     fig, ax = plt.subplots(figsize=(14, 7))
     for label, color in zip(labels, colors):
         rets = all_rets[label]
@@ -161,9 +211,11 @@ def plot_event_study(df, all_rets):
     ax.axvline(0, color="black", lw=2, ls="--", label="금리인하 시작")
     ax.axhline(0, color="gray",  lw=1, ls=":")
     ax.set_xlabel("금리인하 후 경과 개월")
-    ax.set_ylabel("누적 수익률 (%)")
-    ax.set_title("이벤트 스터디: 금리인하 시점 기준 평균 반응 (v6)",
-                 fontsize=13, fontweight="bold")
+    ax.set_ylabel("이벤트 시점 대비 누적 수익률 (%)")
+    ax.set_title("이벤트 스터디: 금리인하 시점 기준 평균 반응 (v8)\n"
+                 "★ 이벤트 시점=0 으로 baseline 정규화, "
+                 "exp(cumsum) 로 정확 누적",
+                 fontsize=12, fontweight="bold")
     ax.legend(); ax.grid(True, alpha=0.3)
     plt.tight_layout()
     path = os.path.join(C.FIG_DIR, "event_study_avg.png")
@@ -171,10 +223,10 @@ def plot_event_study(df, all_rets):
     plt.close()
     print(f"  ✓ 이벤트 스터디 (평균) 저장: {path}")
 
-    # ★ v6: 사이클별 개별 차트
+    # 사이클별 개별 차트 (★ C4 동기화: 04에서도 누적 방식 수정)
     asset_cols = {
         "금 (Gold)":  "Gold_LogReturn",
-        "WTI (원유)": "WTI_LogReturn",
+        "WTI 원유":   "WTI_LogReturn",
         "S&P500":     "SP500_LogReturn",
         "부동산":      "CaseShiller_LogReturn",
         "CPI":        "CPI_LogReturn",
@@ -203,9 +255,18 @@ def plot_event_study(df, all_rets):
             s_idx  = max(0, idx - pre)
             e_idx  = min(len(df), idx + window + 1)
             series = df[col].iloc[s_idx:e_idx]
-            cumret = (1 + series).cumprod() - 1
+            if series.empty:
+                continue
+
+            # ★ C4 동기화: 로그수익률을 올바르게 누적 + 이벤트 baseline
+            log_cum = series.cumsum()
+            event_pos = idx - s_idx
+            if event_pos >= len(log_cum):
+                continue
+            log_cum_centered = log_cum - log_cum.iloc[event_pos]
+            cumret = (np.exp(log_cum_centered) - 1) * 100
             t_axis = range(-pre, len(cumret)-pre)
-            ax.plot(list(t_axis), cumret.values*100,
+            ax.plot(list(t_axis), cumret.values,
                     label=label, color=color, lw=2)
 
         ax.axvline(0, color="black", lw=2, ls="--")
@@ -214,10 +275,10 @@ def plot_event_study(df, all_rets):
                      fontsize=11, fontweight="bold")
         ax.legend(fontsize=8, loc="upper left")
         ax.grid(True, alpha=0.3)
-        ax.set_ylabel("누적 수익률 (%)")
+        ax.set_ylabel("이벤트 시점 대비 누적 수익률 (%)")
 
     axes[-1].set_xlabel("금리인하 후 경과 개월")
-    fig.suptitle("사이클별 이벤트 스터디 (v6)",
+    fig.suptitle("사이클별 이벤트 스터디 (v8: 정확 누적 + baseline 정규화)",
                  fontsize=14, fontweight="bold", y=1.01)
     plt.tight_layout()
     path = os.path.join(C.FIG_DIR, "event_study_cycles.png")
@@ -269,21 +330,21 @@ def plot_cantillon_path(final_order):
     ax.axis("off"); ax.set_facecolor("#f8f9fa")
     ax.set_title(
         "칸티용 효과(Cantillon Effect) 자산 가격 전이 경로\n"
-        "★ 데이터 기반 실증 순서 (v6)",
+        "★ 데이터 기반 실증 순서 (v8 — 순위 평균 기준)",
         fontsize=14, fontweight="bold", pad=20)
 
     node_list = list(nodes.keys())
     for i in range(len(node_list)-1):
         src = node_list[i]; tgt = node_list[i+1]
         x0, y0 = nodes[src]; x1, y1 = nodes[tgt]
-        lag_val = (final_order[i-1][1] if i > 0
-                   else final_order[0][1])
+        rank_val = (final_order[i-1][1] if i > 0
+                    else final_order[0][1])
         ax.annotate("", xy=(x1,y1), xytext=(x0,y0),
                     arrowprops=dict(arrowstyle="-|>",
                                    color="steelblue", lw=2.0,
                                    connectionstyle="arc3,rad=0.08"))
         ax.text((x0+x1)/2, (y0+y1)/2+0.02,
-                f"t+{lag_val:.0f}개월",
+                f"순위 {rank_val:.1f}",
                 ha="center", va="bottom", fontsize=9,
                 color="steelblue", fontweight="bold")
 
@@ -363,7 +424,7 @@ def plot_m2_dashboard(df):
                                      name=tgt,line=dict(color=c2)),
                           row=r,col=c)
 
-    fig.update_layout(title="M2 전년비 증가율 vs 자산 가격 반응 (v6)",
+    fig.update_layout(title="M2 전년비 증가율 vs 자산 가격 반응 (v8)",
                       height=700, template="plotly_white")
     path = os.path.join(C.FIG_DIR, "m2_dashboard.html")
     fig.write_html(path)
@@ -375,7 +436,7 @@ def plot_m2_dashboard(df):
 # ──────────────────────────────────────────────
 
 def main():
-    print("\n[04] 시각화")
+    print("\n[04] 시각화 (v8: C6 + 동기화)")
 
     proc_path = os.path.join(C.DATA_PROC_DIR, "processed_data.csv")
     if not os.path.exists(proc_path):
@@ -387,33 +448,50 @@ def main():
     order_path   = os.path.join(C.RESULT_DIR, "cantillon_order.csv")
     irf_path     = os.path.join(C.RESULT_DIR, "irf_results.csv")
 
-    # 그랜저 히트맵
+    # 그랜저 히트맵  (★ C1 동기화: best_lag → lag)
     if os.path.exists(granger_path):
         gr = pd.read_csv(granger_path)
         if not gr.empty:
             lag_t  = gr.pivot(index="cause", columns="effect",
-                              values="best_lag")
+                              values="lag")
             pval_t = gr.pivot(index="cause", columns="effect",
                               values="p_value")
             plot_granger_heatmap(lag_t, pval_t)
 
-    # 칸티용 경로 맵
+    # 칸티용 경로 맵  (★ C5 동기화: 다중 컬럼 CSV에서 avg_rank 선택)
     final_order = []
     if os.path.exists(order_path):
         od = pd.read_csv(order_path)
-        final_order = list(od.itertuples(index=False, name=None))
+        # C5 새 CSV는 다중 컬럼이지만 plot_cantillon_path는 (label, value)
+        # 튜플 리스트를 기대하므로 asset + avg_rank만 추출
+        if "avg_rank" in od.columns:
+            final_order = list(
+                od[["asset", "avg_rank"]].itertuples(
+                    index=False, name=None))
+        else:
+            # 구버전 CSV 폴백 (avg_lag 사용)
+            avg_col = "avg_lag" if "avg_lag" in od.columns else od.columns[1]
+            final_order = list(
+                od[["asset", avg_col]].itertuples(index=False, name=None))
         plot_cantillon_path(final_order)
 
-    # ★ v6: importlib로 03_analysis 로드
+    # 03 모듈 로드 (이벤트 스터디 다시 실행 + IRF 객체 받기)
     analysis_mod = load_analysis_module()
+
+    # 이벤트 스터디
     event_peaks, all_rets = analysis_mod.run_event_study(df)
     plot_event_study(df, all_rets)
+
+    # ★ C6: IRF 차트 (CI 포함) — irf_obj 필요해서 VAR 재실행
+    print("\n  [C6] IRF 차트용 VAR/IRF 재추정 중...")
+    _, irf_results, irf_obj = analysis_mod.run_var_irf(df)
+    plot_irf(df, irf_obj, irf_results)
 
     # 기타
     plot_easing_overlay(df)
     plot_m2_dashboard(df)
 
-    print("\n  ✅ 시각화 완료")
+    print("\n  ✅ 시각화 완료 (v8 C6 + 동기화)")
 
 
 if __name__ == "__main__":
