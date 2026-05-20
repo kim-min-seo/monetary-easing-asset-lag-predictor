@@ -337,14 +337,16 @@ def plot_cantillon_path(final_order):
     for i in range(len(node_list)-1):
         src = node_list[i]; tgt = node_list[i+1]
         x0, y0 = nodes[src]; x1, y1 = nodes[tgt]
-        rank_val = (final_order[i-1][1] if i > 0
-                    else final_order[0][1])
+        # ★ D4: 라벨 off-by-one 버그 수정
+        # 각 화살표는 i번째 자산을 가리키므로 final_order[i]의 avg_rank 사용
+        # (이전: final_order[i-1] → 모든 화살표가 한 칸씩 밀린 라벨 표시)
+        rank_val = final_order[i][1]
         ax.annotate("", xy=(x1,y1), xytext=(x0,y0),
                     arrowprops=dict(arrowstyle="-|>",
                                    color="steelblue", lw=2.0,
                                    connectionstyle="arc3,rad=0.08"))
         ax.text((x0+x1)/2, (y0+y1)/2+0.02,
-                f"순위 {rank_val:.1f}",
+                f"순위 {rank_val:.2f}",
                 ha="center", va="bottom", fontsize=9,
                 color="steelblue", fontweight="bold")
 
@@ -479,7 +481,7 @@ def main():
     analysis_mod = load_analysis_module()
 
     # 이벤트 스터디
-    event_peaks, all_rets = analysis_mod.run_event_study(df)
+    event_peaks, all_rets, _ = analysis_mod.run_event_study(df)  # ★ D3 sync
     plot_event_study(df, all_rets)
 
     # ★ C6: IRF 차트 (CI 포함) — irf_obj 필요해서 VAR 재실행

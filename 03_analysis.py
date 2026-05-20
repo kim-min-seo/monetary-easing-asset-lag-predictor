@@ -307,6 +307,42 @@ def run_var_irf(df):
         except Exception as e:
             print(f"  ⚠️  대안 순서 추정 실패: {e}")
 
+        # ★ D2: Real_Rate 위치 변경 강건성 (자산 뒤로 이동)
+        #   C3는 자산 5개만 역순으로 했으나 Cholesky 첫 변수 위치는 동일
+        #   → Real_Rate 자체를 자산 뒤로 옮긴 진짜 sensitivity test
+        print("\n  [강건성 검증 2 — Real_Rate를 자산 뒤로 이동]")
+        alt2_order = [c for c in [
+            "QE_Size", "M2_YoY", "TIPS_Spread",
+            "Gold_LogReturn", "WTI_LogReturn",
+            "SP500_LogReturn", "CaseShiller_LogReturn",
+            "CPI_LogReturn",
+            "Real_Rate"   # ← 자산 뒤로
+        ] if c in df.columns]
+
+        try:
+            _, _, alt2_peaks, _ = _fit_var_and_peaks(
+                data, alt2_order, C.VAR_MAX_LAG)
+            print("  자산별 peak month 비교 (기본 vs Real_Rate 후순위):")
+            print(f"  {'자산':25s} {'기본':>8} {'대안2':>8} {'차이':>8}")
+            print("  " + "-" * 55)
+            max_diff2 = 0
+            for col, label in asset_map.items():
+                if col not in base_peaks or col not in alt2_peaks:
+                    continue
+                bp = base_peaks[col]
+                ap = alt2_peaks[col]
+                diff = abs(bp - ap)
+                max_diff2 = max(max_diff2, diff)
+                mark = "" if diff <= 2 else "  ⚠"
+                print(f"  {label:25s} {bp:>8d} {ap:>8d} {diff:>8d}{mark}")
+            if max_diff2 <= 2:
+                print(f"\n  ✓ Real_Rate 위치 강건성 양호: 최대 차이 {max_diff2}개월")
+            else:
+                print(f"\n  ⚠️  Real_Rate 위치 의존성 존재: 최대 차이 {max_diff2}개월")
+                print(f"      → 논문에 통화→자산 식별 순서 정당화 필수")
+        except Exception as e:
+            print(f"  ⚠️  대안2 순서 추정 실패: {e}")
+
         irf_df = pd.DataFrame([
             {"asset": info["label"],
              "peak_month": info["peak_month"],
@@ -334,8 +370,15 @@ def run_event_study(df):
     ★ C4: 누적수익률 계산 수정 + 이벤트 시점 기준 정규화
        - (1+r).cumprod() → np.exp(r.cumsum()) (로그수익률 정확 누적)
        - 이벤트 시점을 baseline(=0)으로 재정렬하여 사전 트렌드 제거
+
+    ★ D3: Half-Peak Time 도입 (반응 시차 metric)
+       - 기존 peak month는 단조 증가 데이터에서 윈도우 끝(20mo)에 쏠림
+       - 신규: 최대 누적 반응의 50%에 처음 도달하는 시점(half_month)
+       - half-life 방법론 기반 (PPP/transmission 연구 표준)
+       - peak month는 보조 정보로 유지
+       - 6/12/24개월 누적반응도 부가 출력
     """
-    print("\n  [3-4] 이벤트 스터디 (v8: 누적수익률 계산 + baseline 수정)")
+    print("\n  [3-4] 이벤트 스터디 (v8: 누적수익률 + baseline + half-peak)")
 
     asset_cols = {
         "금 (Gold)":  "Gold_LogReturn",
@@ -355,7 +398,9 @@ def run_event_study(df):
     window   = 24      # 사후 24개월
     pre      = 6       # 사전 6개월
     all_rets = {label: [] for label in asset_cols}
-    peak_months = {}
+    peak_months    = {}
+    half_months    = {}     # ★ D3: half-peak time
+    horizon_resps  = {}     # ★ D3: 6/12/24개월 누적반응
 
     for event_date in event_dates:
         idx = df.index.get_loc(event_date)
@@ -381,31 +426,105 @@ def run_event_study(df):
             cumret = (np.exp(log_cum_centered) - 1) * 100
             all_rets[label].append(cumret.values[:window+pre+1])
 
-    print("\n  📊 이벤트 스터디 자산별 최대 반응 시점 (이벤트 시점 = 0):")
+    print("\n  📊 이벤트 스터디 반응 시차 (이벤트 시점 = 0):")
+    print(f"  {'자산':12s} {'Half월':>7} {'Peak월':>7} {'Peak값':>9} "
+          f"{'6mo':>7} {'12mo':>7} {'24mo':>9}")
+    print("  " + "-" * 70)
+
+    # ★ D3 + minor fix (sample bias 방지): 두 가지 평균 분리
+    #  (1) peak/half는 모든 사이클 가용한 horizon만 (min_len 일관 표본)
+    #  (2) 6/12/24mo는 nanmean (시점별 가용 사이클 평균, 표본 크기 추적)
+    target_len = window + pre + 1   # = 31
+    n_24mo_warnings = []
+
     for label, rets in all_rets.items():
         if not rets:
             continue
-        min_len = min(len(r) for r in rets)
-        avg_ret = np.mean([r[:min_len] for r in rets], axis=0)
-        # 사후 구간만 peak 탐색 (이벤트 시점 이후)
-        if len(avg_ret) > pre:
-            post_seg = avg_ret[pre:]
-            peak_t   = int(np.argmax(np.abs(post_seg)))
-            peak_v   = float(post_seg[peak_t])
-            peak_months[label] = peak_t
-            print(f"    {label:15s}: 금리인하 후 {peak_t:2d}개월  "
-                  f"(누적 반응 {peak_v:+.2f}%)")
 
+        # ─── (1) 일관 표본 (5사이클 모두 가용) — peak/half용 ───
+        min_len = min(len(r) for r in rets)
+        if min_len <= pre:
+            continue
+        consistent_avg = np.mean([r[:min_len] for r in rets], axis=0)
+        post_consistent = consistent_avg[pre:]   # 5사이클 평균
+
+        # peak month (보조 정보)
+        peak_t = int(np.argmax(np.abs(post_consistent)))
+        peak_v = float(post_consistent[peak_t])
+        peak_months[label] = peak_t
+
+        # ★ D3: Half-peak time
+        threshold = 0.5 * peak_v
+        if peak_v > 0:
+            crossed = np.where(post_consistent >= threshold)[0]
+        elif peak_v < 0:
+            crossed = np.where(post_consistent <= threshold)[0]
+        else:
+            crossed = np.array([0])
+        half_t = int(crossed[0]) if len(crossed) > 0 else peak_t
+        half_months[label] = half_t
+
+        # ─── (2) nanmean 표본 — 6/12/24mo 보조 ───
+        padded = []
+        for r in rets:
+            arr = np.full(target_len, np.nan)
+            arr[:len(r)] = r[:target_len]
+            padded.append(arr)
+        nanmean_avg = np.nanmean(padded, axis=0)
+        post_nanmean = nanmean_avg[pre:]
+        n_per_horizon = np.sum(
+            np.isfinite(np.array(padded)[:, pre:]), axis=0)
+
+        def _resp_at(h):
+            if h >= len(post_nanmean):
+                return float("nan"), 0
+            v = post_nanmean[h]
+            return (float(v) if np.isfinite(v) else float("nan"),
+                    int(n_per_horizon[h]) if h < len(n_per_horizon) else 0)
+
+        h6, n6   = _resp_at(6)
+        h12, n12 = _resp_at(12)
+        h24, n24 = _resp_at(24)
+        horizon_resps[label] = {
+            "6mo": h6, "12mo": h12, "24mo": h24,
+            "n_6mo": n6, "n_12mo": n12, "n_24mo": n24,
+        }
+        if n24 > 0 and n24 < n6:
+            n_24mo_warnings.append((label, n24, n6))
+
+        # 출력 — 24mo는 별표 (표본 다를 때)
+        def _fmt_pct(v):
+            return f"{v:>+6.1f}%" if np.isfinite(v) else f"  n/a "
+        h24_marker = "*" if (n24 > 0 and n24 < n6) else " "
+        h24_str = (f"{h24:>+6.1f}%{h24_marker}"
+                   if np.isfinite(h24) else f"  n/a  ")
+
+        print(f"  {label:12s} {half_t:>7d} {peak_t:>7d} "
+              f"{peak_v:>+8.2f}% {_fmt_pct(h6)} {_fmt_pct(h12)} {h24_str}")
+
+    # 24mo 표본 차이 footnote
+    if n_24mo_warnings:
+        lb, n24, n6 = n_24mo_warnings[0]
+        print(f"  * 24mo는 일부 사이클이 미도달 (n={n24}, 다른 horizon n={n6}). "
+              f"진행중인 2024 사이클 제외됨.")
+
+    # CSV 저장 — 확장된 컬럼
     ev_df = pd.DataFrame([
-        {"asset": label, "peak_month": m}
-        for label, m in peak_months.items()
+        {"asset":      label,
+         "half_month": half_months.get(label),
+         "peak_month": peak_months.get(label),
+         "cumret_6m":  horizon_resps.get(label, {}).get("6mo"),
+         "cumret_12m": horizon_resps.get(label, {}).get("12mo"),
+         "cumret_24m": horizon_resps.get(label, {}).get("24mo"),
+         }
+        for label in peak_months.keys()
     ])
     if not ev_df.empty:
         path = os.path.join(C.RESULT_DIR, "event_study_results.csv")
         ev_df.to_csv(path, index=False)
-        print(f"  ✓ 저장: {path}")
+        print(f"\n  ✓ 저장: {path}")
 
-    return peak_months, all_rets
+    return peak_months, all_rets, half_months
 
 
 # ──────────────────────────────────────────────
@@ -418,6 +537,12 @@ def derive_cantillon_order(granger_df, irf_results, event_peaks):
        - 각 방법(그랜저/IRF/이벤트) 내에서 자산 1~5위 순위 매김
        - 방법별 순위를 평균하여 최종 순서 결정
        - 표시: 원본 lag + 방법별 순위 + 평균 순위
+
+    ★ D3: event_peaks 파라미터는 이제 half-peak time (peak month가 아닌
+          최대 누적 반응의 50%에 도달하는 시점). PPP/transmission 연구에서
+          사용되는 half-life methodology 기반의 speed-of-adjustment metric.
+          → 단조 증가 데이터에서 윈도우 끝(20mo)에 쏠리는 문제 해결
+          → timing 차원 보존 (Cantillon transmission ordering 핵심)
     """
     print("\n  [3-5] 칸티용 전이 순서 자동 도출 (v8: 순위 평균)")
 
@@ -469,7 +594,7 @@ def derive_cantillon_order(granger_df, irf_results, event_peaks):
 
     # 4) 평균 순위
     print(f"\n  {'자산':12s} "
-          f"{'G_lag':>7} {'I_lag':>7} {'E_lag':>7}  "
+          f"{'G_lag':>7} {'I_lag':>7} {'E_half':>7}  "
           f"{'G순위':>6} {'I순위':>6} {'E순위':>6} "
           f"{'평균순위':>8}")
     print("  " + "-" * 75)
@@ -547,21 +672,23 @@ def main():
     adf_results = run_adf_test(df)
     granger_df, lag_t, pval_t = run_granger_analysis(df)
     var_results, irf_results, irf_obj = run_var_irf(df)
-    event_peaks, all_rets = run_event_study(df)
+    event_peaks, all_rets, half_months = run_event_study(df)  # ★ D3
+    # ★ D3: half-peak time을 이벤트 timing metric으로 사용
     final_order = derive_cantillon_order(
-        granger_df, irf_results, event_peaks)
+        granger_df, irf_results, half_months)
 
-    print("\n  ✅ 실증 분석 완료 (v8 C1~C5)")
+    print("\n  ✅ 실증 분석 완료 (v8 C1~C5 + D1~D3)")
     return {
-        "adf":        adf_results,
-        "granger":    granger_df,
-        "lag_table":  lag_t,
-        "pval_table": pval_t,
-        "irf":        irf_results,
-        "irf_obj":    irf_obj,
-        "event":      event_peaks,
-        "all_rets":   all_rets,
-        "order":      final_order,
+        "adf":         adf_results,
+        "granger":     granger_df,
+        "lag_table":   lag_t,
+        "pval_table":  pval_t,
+        "irf":         irf_results,
+        "irf_obj":     irf_obj,
+        "event":       event_peaks,
+        "event_half":  half_months,    # ★ D3
+        "all_rets":    all_rets,
+        "order":       final_order,
     }
 
 
