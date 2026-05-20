@@ -99,7 +99,6 @@ def build_monetary_vars(df):
 
     if "T10Y" in df.columns and "TIPS_10Y" in df.columns:
         new_cols["TIPS_Spread"]      = df["T10Y"] - df["TIPS_10Y"]
-        new_cols["Inflation_Expect"] = df["T10Y"] - df["TIPS_10Y"]
         print("  ✓ TIPS 스프레드 생성")
 
     df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)

@@ -52,7 +52,7 @@ def run_adf_test(df):
         [c for c in [
             "FedRate_Change", "Real_Rate", "QE_Size",
             "DXY_Change", "M2_YoY", "Yield_Spread",
-            "TIPS_Spread", "Inflation_Expect"
+            "TIPS_Spread"
         ] if c in df.columns]
     )
 
@@ -99,7 +99,7 @@ def run_granger_analysis(df):
 
     causes = [c for c in [
         "FedRate_Change", "Real_Rate", "QE_Size", "DXY_Change",
-        "M2_YoY", "TIPS_Spread", "Inflation_Expect",
+        "M2_YoY", "TIPS_Spread",
         "Monetary_Ease_Index"
     ] if c in df.columns]
 

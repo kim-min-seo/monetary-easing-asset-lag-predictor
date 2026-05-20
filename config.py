@@ -79,7 +79,6 @@ MONETARY_VARS = [
     "M2_MoM",
     "M2_Accel",
     "TIPS_Spread",       # 기대 인플레이션
-    "Inflation_Expect",  # 10Y - TIPS (BEI)
     "PPI_YoY",           # ★ v7 추가: 생산자물가 전년비 (CPI 선행)
     "PPI_LogReturn",     # ★ v7 추가: PPI 월간 변화율
     "VIX_Level",         # ★ v7 추가: 변동성 지수 (SP500 역행)

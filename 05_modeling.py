@@ -53,7 +53,7 @@ GRANGER_PRIORITY = {
         "Real_Rate_lag2", "Real_Rate_lag3",
         "QE_Size_lag3", "QE_Size_lag4",
         "TIPS_Spread_lag4", "TIPS_Spread_lag3",
-        "Inflation_Expect_lag4", "FedRate_Change_lag1",
+        "FedRate_Change_lag1",
     ],
     "WTI": [
         "Real_Rate_lag1", "Real_Rate_lag2",
@@ -75,7 +75,7 @@ GRANGER_PRIORITY = {
     "CaseShiller": [
         "Real_Rate_lag11", "Real_Rate_lag12",
         "Real_Rate_lag9",  "Real_Rate_lag10",
-        "Inflation_Expect_lag19", "TIPS_Spread_lag19",
+        "TIPS_Spread_lag19",
         "DXY_Change_lag24",
     ],
     "CPI": [
