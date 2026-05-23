@@ -35,39 +35,45 @@ print("=" * 62)
 
 # ── STEP 1 ──────────────────────────────────────────────────
 print("\n" + "="*62)
-print("  STEP 1/6 — 데이터 수집 (FRED + Yahoo Finance)")
+print("  STEP 1/7 — 데이터 수집 (FRED + Yahoo Finance)")
 print("="*62)
 run_module("01_data_collection")
 
 # ── STEP 2 ──────────────────────────────────────────────────
 print("\n" + "="*62)
-print("  STEP 2/6 — 전처리 (CaseShiller 2차 차분 + TIPS 추가)")
+print("  STEP 2/7 — 전처리 (CaseShiller 2차 차분 + TIPS 추가)")
 print("="*62)
 run_module("02_preprocessing")
 
 # ── STEP 3 ──────────────────────────────────────────────────
 print("\n" + "="*62)
-print("  STEP 3/6 — 실증 분석 (ADF · 그랜저 · VAR · IRF)")
+print("  STEP 3/7 — 실증 분석 (ADF · 그랜저 · VAR · IRF)")
 print("="*62)
 run_module("03_analysis")
 
 # ── STEP 4 ──────────────────────────────────────────────────
 print("\n" + "="*62)
-print("  STEP 4/6 — 시각화")
+print("  STEP 4/7 — 시각화")
 print("="*62)
 run_module("04_visualization")
 
 # ── STEP 5 ──────────────────────────────────────────────────
 print("\n" + "="*62)
-print("  STEP 5/6 — 예측 모델 (XGBoost · LightGBM · 가중앙상블)")
+print("  STEP 5/7 — 예측 모델 (XGBoost · LightGBM · 가중앙상블)")
 print("="*62)
 run_module("05_modeling")
 
 # ── STEP 6 ──────────────────────────────────────────────────
 print("\n" + "="*62)
-print("  STEP 6/6 — QVAR Spillover 분석 (경기국면별 전이 구조)")
+print("  STEP 6/7 — QVAR Spillover 분석 (경기국면별 전이 구조)")
 print("="*62)
 run_module("06_qvar_spillover")
+
+# ── STEP 7 ──────────────────────────────────────────────────
+print("\n" + "="*62)
+print("  STEP 7/7 — 반응 타이밍 + QE 규모 분석 (v8a)")
+print("="*62)
+run_module("07_response_timing")
 # ── 완료 ────────────────────────────────────────────────────
 print("\n" + "="*62)
 print("  ✅ v6 파이프라인 완료!")
