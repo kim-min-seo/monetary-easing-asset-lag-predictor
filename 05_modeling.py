@@ -45,46 +45,31 @@ def set_font():
 
 
 # ============================================================
-#  자산별 고정 피처 (Granger 분석 결과 기반)
-#  ※ 데이터 기반 동적 선택 없음 → 누수 차단
+#  자산별 고정 피처 (★ v8 A안: 실제 Granger 유의 관계 기반)
+#  ※ 03_analysis의 granger_results.csv에서 p<0.05인
+#    (cause, AIC선택시차) 쌍만 사용 — C1(AIC 단일 시차)과 정합
+#  ※ 형식: (변수명, 시차). 05 main에서 원본 변수를 해당 시차만큼
+#    shift하여 피처 생성 (과거값 → 누수 없음).
+#  ※ 02의 고정 LAG_PERIODS에 없는 정확한 시차도 사용 가능.
+#  ※ CaseShiller는 유의한 Granger cause가 없음 → 공통 피처만
+#    (= "부동산은 월간 통화변수로 설명되지 않음" v8 메시지)
 # ============================================================
 GRANGER_PRIORITY = {
     "Gold": [
-        "Real_Rate_lag2", "Real_Rate_lag3",
-        "QE_Size_lag3", "QE_Size_lag4",
-        "TIPS_Spread_lag4", "TIPS_Spread_lag3",
-        "FedRate_Change_lag1",
+        ("Real_Rate", 4), ("QE_Size", 3), ("TIPS_Spread", 4),
     ],
     "WTI": [
-        "Real_Rate_lag1", "Real_Rate_lag2",
-        "M2_YoY_lag1", "M2_YoY_lag2",
-        "TIPS_Spread_lag1", "TIPS_Spread_lag2",
-        "FedRate_Change_lag1",
-        "DXY_Change_lag1", "DXY_Change_lag3",
-        "DXY_YoY_lag1", "DXY_YoY_lag3",
-        "VIX_lag1", "VIX_Change_lag1",
+        ("Real_Rate", 2), ("M2_YoY", 12),
+        ("TIPS_Spread", 2), ("Monetary_Ease_Index", 4),
     ],
     "SP500": [
-        "Real_Rate_lag1", "Real_Rate_lag2",
-        "QE_Size_lag1", "QE_Size_lag2",
-        "M2_YoY_lag2", "M2_YoY_lag3",
-        "FedRate_Change_lag1", "TIPS_Spread_lag1",
-        "Monetary_Ease_Index_lag6",
-        "VIX_lag1", "VIX_Change_lag1",
+        ("Real_Rate", 2), ("TIPS_Spread", 1),
+        ("Monetary_Ease_Index", 7),
     ],
-    "CaseShiller": [
-        "Real_Rate_lag11", "Real_Rate_lag12",
-        "Real_Rate_lag9",  "Real_Rate_lag10",
-        "TIPS_Spread_lag19",
-        "DXY_Change_lag24",
-    ],
+    "CaseShiller": [],   # 유의한 Granger cause 없음 → 공통 피처만
     "CPI": [
-        "Real_Rate_lag12", "Real_Rate_lag11",
-        "M2_YoY_lag1", "M2_YoY_lag2",
-        "DXY_Change_lag24", "QE_Size_lag5",
-        "TIPS_Spread_lag19", "FedRate_Change_lag3",
-        "PPI_LogReturn_lag1", "PPI_LogReturn_lag3",
-        "PPI_YoY_lag1", "PPI_YoY_lag3",
+        ("FedRate_Change", 3), ("Real_Rate", 15),
+        ("M2_YoY", 15), ("TIPS_Spread", 5),
     ],
 }
 
@@ -428,7 +413,7 @@ def run_shap(model, X_test, asset_name):
 
 def print_benchmark(all_metrics):
     print(f"\n{'='*72}")
-    print("  ★ 선행연구 대비 성능 벤치마크 (WF 기준)")
+    print("  선행연구 대비 성능 벤치마크 (WF 기준)")
     print(f"{'='*72}")
     print(f"  {'자산':^10} {'선행연구':>9} {'우리 WF':>9} {'차이':>8} {'논문'}")
     print("  " + "-" * 70)
@@ -476,10 +461,17 @@ def main():
         print(f"  ▶ 자산: {asset_name}  ({target_col})")
         print("=" * 64)
 
-        # ── 고정 피처 ──
-        granger_feats = [f for f in GRANGER_PRIORITY.get(asset_name, [])
-                         if f in df.columns]
-        common_feats  = [c for c in COMMON_FEATURES if c in df.columns]
+        # ── 고정 피처 (★ v8 A안: 원본 변수를 AIC 시차로 즉석 shift) ──
+        df_local = df.copy()
+        granger_feats = []
+        for var, lag in GRANGER_PRIORITY.get(asset_name, []):
+            if var in df_local.columns:
+                col = f"{var}_glag{lag}"          # glag = Granger AIC lag
+                df_local[col] = df_local[var].shift(lag)  # 과거값 → 누수 없음
+                granger_feats.append(col)
+            else:
+                print(f"   원본 변수 없음: {var} (건너뜀)")
+        common_feats  = [c for c in COMMON_FEATURES if c in df_local.columns]
         feat_cols = list(dict.fromkeys(granger_feats + common_feats))
         feat_cols = [c for c in feat_cols if c != target_col]
 
@@ -488,7 +480,7 @@ def main():
         print(f"  사용 피처 {len(feat_cols)}개 "
               f"(Granger {len(granger_feats)} + 공통 {len(common_feats)})")
 
-        data = df[[target_col] + feat_cols].dropna()
+        data = df_local[[target_col] + feat_cols].dropna()
         if len(data) < C.MIN_TRAIN + 30:
             print(f"  데이터 부족 ({len(data)}개)"); continue
 
@@ -539,7 +531,7 @@ def main():
         # ── Raw 베이스라인 (B4) ──
         raw_acc = run_raw_baseline_wf(df, asset_name, target_col)
         if raw_acc is not None and not np.isnan(raw_acc):
-            print(f"\n  📊 엔지니어링 효과 (WF 기준 공정 비교):")
+            print(f"\n  엔지니어링 효과 (WF 기준 공정 비교):")
             print(f"     Raw 모델 WF      : {raw_acc:.1f}%")
             print(f"     v8 모델 WF       : {wf_best['avg_acc']:.1f}%")
             print(f"     Base Rate        : {wf_best['avg_base']:.1f}%")
@@ -570,7 +562,7 @@ def main():
 
     # ── 종합 요약 ──
     print(f"\n{'='*84}")
-    print("  🏆 v8 자산별 성능 요약 (★ WF가 메인 지표)")
+    print("   v8 자산별 성능 요약 (★ WF가 메인 지표)")
     print("=" * 84)
     print(f"  {'자산':12s} {'WF':>7} {'Base':>7} {'Gain':>8} {'Raw_WF':>8} "
           f"{'HO_Acc':>8} {'HO_MCC':>8} {'모델':>5}")
@@ -591,7 +583,7 @@ def main():
     plot_model_comparison(all_metrics)
     print_benchmark(all_metrics)
 
-    print("\n  ✅ 예측 모델 완료 (v8 Clean)")
+    print("\n   예측 모델 완료 (v8 Clean)")
     return all_metrics
 
 
