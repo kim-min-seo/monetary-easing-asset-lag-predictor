@@ -1,16 +1,14 @@
 # ============================================================
-#  02_preprocessing.py — 전처리 (v7 Regime)
-#  ★ v7 핵심 추가:
-#  QVAR Spillover 결과 기반 경기 국면 변수 생성
+#  02_preprocessing.py — 전처리 (v8)
 #
-#  QVAR 결과:
-#  τ=0.05 침체기: SP500(+24.53), Oil(+14.28) 선도
-#  τ=0.50 중립기: Oil→CPI 경로 지배적
-#  τ=0.95 과열기: Oil→CPI(24.71), M2→CaseShiller(11.26)
-#
-#  → 국면 변수를 피처로 추가하면
-#    모델이 현재 국면을 알고 예측 가능
-#    국면별 별도 모델 학습 시 핵심 변수
+#  v8 변경:
+#  - 경기 국면 변수(Regime_Recession/Neutral/Overheating/Index)는
+#    유지 (05 COMMON_FEATURES에서 실제 사용).
+#  - v7의 QVAR 국면×자산 상호작용 피처(Regime_Rec/Neu/Ovr_*)는
+#    05에서 0번 사용되는 dead feature → 제거.
+#    이유: v8 정체성(순수 통화변수 전이)과 불일치 + 노이즈 제거.
+#  - QVAR Spillover 분석 자체는 06_qvar_spillover.py에서 수행하며,
+#    본 전처리의 상호작용 피처와 무관(분석 결과는 그대로 보존).
 # ============================================================
 
 import pandas as pd
@@ -212,63 +210,6 @@ def add_qvar_regime_features(df):
         print(f"    침체기: {recession.sum()}개월")
         print(f"    중립기: {neutral.sum()}개월")
         print(f"    과열기: {overheating.sum()}개월")
-
-    # ────────────────────────────────────────
-    # QVAR 침체기 핵심 경로 피처
-    # SP500(NET+24.53), Oil(NET+14.28) 선도
-    # ────────────────────────────────────────
-    if "SP500_LogReturn" in df.columns and "Regime_Recession" in new_cols:
-        for lag in [1, 3, 6]:
-            # 침체기에서 SP500이 선도자 → SP500 시차 강조
-            new_cols[f"Regime_Rec_SP500_lag{lag}"] = (
-                df["SP500_LogReturn"].shift(lag) *
-                new_cols["Regime_Recession"]
-            )
-        print("  ✓ 침체기 SP500 선도 피처 생성")
-
-    if "WTI_LogReturn" in df.columns and "Regime_Recession" in new_cols:
-        for lag in [1, 3, 6]:
-            # 침체기에서 Oil이 선도자
-            new_cols[f"Regime_Rec_Oil_lag{lag}"] = (
-                df["WTI_LogReturn"].shift(lag) *
-                new_cols["Regime_Recession"]
-            )
-        print("  ✓ 침체기 Oil 선도 피처 생성")
-
-    # ────────────────────────────────────────
-    # QVAR 중립기 핵심 경로 피처
-    # Oil→CPI(27.61) 경로 지배적
-    # ────────────────────────────────────────
-    if "WTI_LogReturn" in df.columns and "Regime_Neutral" in new_cols:
-        for lag in [1, 3, 6]:
-            # 중립기에서 Oil→CPI 경로 강조
-            new_cols[f"Regime_Neu_Oil_lag{lag}"] = (
-                df["WTI_LogReturn"].shift(lag) *
-                new_cols["Regime_Neutral"]
-            )
-        print("  ✓ 중립기 Oil→CPI 경로 피처 생성")
-
-    # ────────────────────────────────────────
-    # QVAR 과열기 핵심 경로 피처
-    # Oil→CPI(24.71), M2→CaseShiller(11.26)
-    # ────────────────────────────────────────
-    if "WTI_LogReturn" in df.columns and "Regime_Overheating" in new_cols:
-        for lag in [1, 3, 6]:
-            # 과열기 Oil→CPI 경로
-            new_cols[f"Regime_Ovr_Oil_lag{lag}"] = (
-                df["WTI_LogReturn"].shift(lag) *
-                new_cols["Regime_Overheating"]
-            )
-        print("  ✓ 과열기 Oil→CPI 경로 피처 생성")
-
-    if "M2_YoY" in df.columns and "Regime_Overheating" in new_cols:
-        for lag in [1, 3, 6]:
-            # 과열기 M2→CaseShiller 경로
-            new_cols[f"Regime_Ovr_M2_lag{lag}"] = (
-                df["M2_YoY"].shift(lag) *
-                new_cols["Regime_Overheating"]
-            )
-        print("  ✓ 과열기 M2→CaseShiller 경로 피처 생성")
 
 
     df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
