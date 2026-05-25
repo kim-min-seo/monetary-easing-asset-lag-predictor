@@ -156,6 +156,34 @@ def fetch_data(api_key: str) -> pd.DataFrame:
 
 
 # ============================================================
+#  ★ 검수#2: 메인 파이프라인 데이터 연동
+#  06이 자체 fetch_data로 별개 데이터셋(1998~, 독립 캐시)을 쓰던 문제 →
+#  01이 만든 data/raw/raw_data.csv를 1차 소스로 사용(단일 출처).
+#  6변수(CPI/Oil/Gold/M2/SP500/CaseShiller)를 선택, WTI→Oil 매핑.
+#  raw_data.csv가 없거나 컬럼이 부족할 때만 fetch_data로 폴백.
+# ============================================================
+def load_from_pipeline():
+    """메인 raw_data.csv에서 QVAR 6변수를 fetch_data와 동일 스키마로 로드.
+    실패 시 None 반환 → main에서 fetch_data 폴백."""
+    raw_path = os.path.join(C.DATA_RAW_DIR, "raw_data.csv")
+    if not os.path.exists(raw_path):
+        return None
+    df = pd.read_csv(raw_path, index_col=0, parse_dates=True)
+    need = {"CPI": "CPI", "WTI": "Oil", "Gold": "Gold",
+            "M2": "M2", "SP500": "SP500", "CaseShiller": "CaseShiller"}
+    missing = [c for c in need if c not in df.columns]
+    if missing:
+        print(f"  ⚠️  raw_data.csv에 {missing} 없음 → fetch_data 폴백")
+        return None
+    out = df[list(need)].rename(columns=need)
+    out.index = pd.to_datetime(out.index)
+    out = out.resample("MS").last().dropna()
+    print(f"  ✓ 메인 파이프라인 데이터 사용(단일 출처): {out.shape}, "
+          f"{out.index[0].date()} ~ {out.index[-1].date()}")
+    return out
+
+
+# ============================================================
 # 2. 수익률 변환
 # ============================================================
 def compute_returns(df: pd.DataFrame) -> pd.DataFrame:
@@ -390,12 +418,17 @@ def spillover_table(Psi_tilde, var_names):
 def main():
     print("\n[06] QVAR Spillover 분석 (경기국면별 전이 구조)")
 
-    if not C.FRED_API_KEY or C.FRED_API_KEY == "your_fred_api_key_here":
-        print("  ⚠️  FRED_API_KEY 없음 → .env 파일 확인")
-        return
-
-    df_raw = fetch_data(C.FRED_API_KEY)
-    if df_raw is None:
+    # ★ 검수#2: 메인 파이프라인 raw_data.csv 1차 사용(단일 출처),
+    #   없거나 컬럼 부족 시에만 06 자체 fetch_data 폴백.
+    df_raw = load_from_pipeline()
+    if df_raw is None or df_raw.empty:
+        print("  메인 raw_data.csv 미발견 → 06 자체 fetch_data 폴백 "
+              "(01을 먼저 실행하면 동일 데이터로 통합됨)")
+        if not C.FRED_API_KEY or C.FRED_API_KEY == "your_fred_api_key_here":
+            print("  ⚠️  FRED_API_KEY 없음 → .env 확인 (또는 01 먼저 실행)")
+            return
+        df_raw = fetch_data(C.FRED_API_KEY)
+    if df_raw is None or df_raw.empty:
         return
 
     ret = compute_returns(df_raw)
