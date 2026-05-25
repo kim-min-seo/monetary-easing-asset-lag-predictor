@@ -58,10 +58,15 @@ def _event_dates(df):
 
 
 def _crossing(post, frac, peak_v):
-    """|post|가 frac*|peak_v|에 처음 도달하는 인덱스.
-    부호 인지 (03 half-peak와 동일 논리). 도달 못하면 peak 위치 반환."""
-    thr = frac * abs(peak_v)
-    hit = np.where(np.abs(post) >= thr)[0]
+    """post가 peak와 같은 방향으로 frac*peak_v(부호 포함)에 처음 도달하는 인덱스.
+    ★ 검수#3a: 기존 abs() 기반은 하락 사이클(예: GFC SP500 -55%)에서
+    반대방향 일시 변동을 onset/half로 오인할 수 있었음 → 03 D3와 동일한
+    '방향 일치 임계 교차'로 수정. 미도달 시 peak 위치 반환."""
+    thr = frac * peak_v                       # 부호 보존 임계값
+    if peak_v >= 0:
+        hit = np.where(post >= thr)[0]        # 상승 사이클
+    else:
+        hit = np.where(post <= thr)[0]        # 하락 사이클
     return int(hit[0]) if len(hit) else int(np.argmax(np.abs(post)))
 
 
@@ -97,6 +102,13 @@ def extract_timing(df):
             if post is None or len(post) < 2:
                 continue
 
+            # ★ 검수#3a: 진행 중(미완) 사이클 표본편향 처리.
+            #   post[0]=t0 포함이므로 사후 가용 개월 = len(post)-1.
+            #   사후 윈도우(EVENT_POST_MONTHS)를 못 채운 사이클은 peak이
+            #   잘린 끝에 쏠려 편향됨 → complete=False 표시, 집계에서 제외.
+            post_avail = len(post) - 1
+            complete   = post_avail >= C.EVENT_POST_MONTHS
+
             peak_t = int(np.argmax(np.abs(post)))
             peak_v = float(post[peak_t])
             if peak_v == 0:
@@ -116,6 +128,8 @@ def extract_timing(df):
                 "peak_value_pct": round(peak_v, 2),
                 "rise_duration":  dur,
                 "transmission_velocity": round(vel, 3) if vel == vel else np.nan,
+                "post_avail_months": post_avail,
+                "complete":    complete,
             })
 
     timing_df = pd.DataFrame(rows)
@@ -323,8 +337,11 @@ def plot_qe_vs_response(combined_df):
         return
 
     data = combined_df.dropna(subset=["qe_volume_trillion"]).copy()
+    # ★ 검수#3a: 진행 중 사이클은 타이밍(onset/peak)이 편향되므로 버블에서 제외.
+    if "complete" in data.columns:
+        data = data[data["complete"]].copy()
     if data.empty:
-        print("  ⚠️  QE 규모 유효값 없음 — 버블 차트 건너뜀")
+        print("  ⚠️  QE 규모 유효값 없음(완료 사이클 기준) — 버블 차트 건너뜀")
         return
 
     fig, axes = plt.subplots(1, 2, figsize=(15, 6))
@@ -361,13 +378,24 @@ def print_summary(timing_df, qe_df):
         print("  (타이밍 결과 없음)")
         return
 
+    # ★ 검수#3a: 진행 중 사이클(complete=False) 제외하고 집계 (03 D3 정합).
+    if "complete" in timing_df.columns:
+        comp = timing_df[timing_df["complete"]]
+        excluded = sorted(set(timing_df.loc[~timing_df["complete"], "event"]))
+    else:
+        comp = timing_df
+        excluded = []
+
     print(f"\n{'='*72}")
-    print("  자산별 평균 반응 타이밍 (모든 이벤트 평균, 단위: 개월)")
+    print("  자산별 평균 반응 타이밍 (완료 사이클만, 단위: 개월)")
+    if excluded:
+        print(f"  ※ 진행 중(사후 {C.EVENT_POST_MONTHS}개월 미충족) 사이클 제외: "
+              f"{', '.join(excluded)}")
     print(f"{'='*72}")
     print(f"  {'자산':12s} {'상승시작':>8} {'반감':>8} {'최대상승':>8} "
-          f"{'소요':>6} {'속도(%/월)':>10}")
-    print("  " + "-" * 64)
-    g = timing_df.groupby("asset")
+          f"{'소요':>6} {'속도(%/월)':>10} {'n':>4}")
+    print("  " + "-" * 70)
+    g = comp.groupby("asset")
     for asset in C.TIMING_ASSETS.keys():
         if asset not in g.groups:
             continue
@@ -375,7 +403,9 @@ def print_summary(timing_df, qe_df):
         print(f"  {asset:12s} {sub['onset_month'].mean():>8.1f} "
               f"{sub['half_month'].mean():>8.1f} {sub['peak_month'].mean():>8.1f} "
               f"{sub['rise_duration'].mean():>6.1f} "
-              f"{sub['transmission_velocity'].mean():>10.3f}")
+              f"{sub['transmission_velocity'].mean():>10.3f} {len(sub):>4d}")
+    print("  ※ 일관표본 경로평균 기반 onset/half/peak는 timing_profile_*.png "
+          "(03 D3와 동일 방법) 참조")
 
     if not qe_df.empty:
         print(f"\n{'='*72}")
