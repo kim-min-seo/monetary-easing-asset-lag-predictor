@@ -59,7 +59,7 @@ GRANGER_PRIORITY = {
         ("Real_Rate", 4), ("QE_Size", 3), ("TIPS_Spread", 4),
     ],
     "WTI": [
-        ("Real_Rate", 2), ("M2_YoY", 12),
+        ("Real_Rate", 12), ("M2_YoY", 12),
         ("TIPS_Spread", 2), ("Monetary_Ease_Index", 4),
     ],
     "SP500": [
