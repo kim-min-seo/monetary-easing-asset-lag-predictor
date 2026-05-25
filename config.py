@@ -126,6 +126,23 @@ WF_SPLITS  = 5
 MIN_TRAIN  = 60
 
 # ──────────────────────────────────────────────
+#  반응 타이밍 + QE 규모 분석 (07_response_timing, ★ v8a)
+# ──────────────────────────────────────────────
+EVENT_PRE_MONTHS  = 6        # 이벤트 사전 윈도우
+EVENT_POST_MONTHS = 24       # 이벤트 사후 윈도우
+ONSET_FRAC        = 0.10     # 최종 peak의 10% 도달 = 상승 시작 시점
+HALF_FRAC         = 0.50     # 반감 시점
+
+TIMING_ASSETS = {            # 라벨 ↔ 컬럼
+    "금 (Gold)": "Gold_LogReturn",
+    "WTI 원유":  "WTI_LogReturn",
+    "S&P500":    "SP500_LogReturn",
+    "부동산":     "CaseShiller_LogReturn",
+    "CPI":       "CPI_LogReturn",
+}
+WALCL_TO_TRILLION = 1e6      # WALCL $백만 → $조 환산
+
+# ──────────────────────────────────────────────
 #  경로 (자동 생성)
 # ──────────────────────────────────────────────
 BASE_DIR      = Path(__file__).parent
