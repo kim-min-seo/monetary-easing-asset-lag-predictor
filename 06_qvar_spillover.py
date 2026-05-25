@@ -1,5 +1,5 @@
 """
-06_qvar_spillover.py — Quantile-VAR Spillover Connectedness Analysis (v7)
+06_qvar_spillover.py — Quantile-VAR Spillover Connectedness Analysis (v8)
 ==========================================================================
 Variables: CPI, Oil (WTI), Gold, M2, S&P500, Case-Shiller HPI
 Period: 1998-01 ~ present (US monthly data)
@@ -14,7 +14,7 @@ Produces:
   6) Quantile-VAR spillover connectedness at τ = 0.05, 0.50, 0.95
 
 Author: 이찬수
-v7 통합: config.py의 경로 설정 연동
+v8 통합: config.py의 경로 설정 연동
 """
 
 import warnings
@@ -43,7 +43,7 @@ def set_font():
     plt.rcParams["axes.unicode_minus"] = False
 
 
-# ★ v7: config.py 경로 연동
+# ★ v8: config.py 경로 연동
 OUT_DIR = C.RESULT_DIR
 FIG_DIR = C.FIG_DIR
 

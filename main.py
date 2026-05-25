@@ -1,5 +1,5 @@
 # ============================================================
-#  main.py — 파이프라인 실행기 (v8a)
+#  main.py — 파이프라인 실행기 (v8)
 #  · 전체 실행 / 단계별 선택 실행 지원
 #  · 인자 없이 실행하면 대화형 메뉴, CLI 플래그로도 지정 가능
 #
@@ -35,7 +35,7 @@ STEPS = {
     4: ("04_visualization",    "시각화"),
     5: ("05_modeling",         "예측 모델 (XGBoost · LightGBM)"),
     6: ("06_qvar_spillover",   "QVAR Spillover (경기국면별 전이 구조)"),
-    7: ("07_response_timing",  "반응 타이밍 + QE 규모 분석 (v8a)"),
+    7: ("07_response_timing",  "반응 타이밍 + QE 규모 분석 (v8)"),
 }
 TOTAL = len(STEPS)
 
@@ -75,7 +75,7 @@ def run_steps(step_list):
     step_list = sorted(set(step_list))
     print("=" * 62)
     print("  통화 완화 환경에서의 자산군별 가격 반응 시차 실증 분석")
-    print("  ★ VERSION 8a")
+    print("  ★ VERSION 8")
     print(f"  실행 단계: {', '.join(f'{s:02d}' for s in step_list)}")
     print(f"  실행 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 62)
@@ -98,7 +98,7 @@ def run_steps(step_list):
         run_module(name)
 
     print("\n" + "=" * 62)
-    print("  ✅ 파이프라인 완료 (v8a)")
+    print("  ✅ 파이프라인 완료 (v8)")
     print(f"  완료 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("  결과 위치:  outputs/figures/ (차트) · outputs/results/ (CSV)")
     print("=" * 62)
@@ -107,7 +107,7 @@ def run_steps(step_list):
 def interactive_menu():
     """인자 없이 실행 시 대화형 메뉴."""
     print("=" * 62)
-    print("  파이프라인 실행 메뉴 (v8a)")
+    print("  파이프라인 실행 메뉴 (v8)")
     print("=" * 62)
     print("  1. 전체 실행 (01~07)")
     print("  2. 저장된 데이터로 학습 (01 건너뜀, 02~07)")
@@ -152,7 +152,7 @@ def interactive_menu():
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="통화완화 자산 시차 분석 파이프라인 실행기 (v8a)")
+        description="통화완화 자산 시차 분석 파이프라인 실행기 (v8)")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--all", action="store_true",
                    help="전체 실행 (01~07)")

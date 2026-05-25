@@ -1,5 +1,5 @@
 # ============================================================
-#  07_response_timing.py — 반응 타이밍 + QE 규모 분석 (★ v8a)
+#  07_response_timing.py — 반응 타이밍 + QE 규모 분석 (v8)
 #
 #  분석 초점 전환:
 #   · 자산: "얼마나 올랐나(크기)" → "언제 시작/반감/정점인가(타이밍)"
@@ -424,7 +424,7 @@ def print_summary(timing_df, qe_df):
 #  메인
 # ============================================================
 def main():
-    print("\n[07] 반응 타이밍 + QE 규모 분석 (v8a)")
+    print("\n[07] 반응 타이밍 + QE 규모 분석 (v8)")
     set_font()
 
     proc_path = os.path.join(C.DATA_PROC_DIR, "processed_data.csv")
@@ -443,7 +443,7 @@ def main():
     plot_qe_vs_response(combined)             # T6
 
     print_summary(timing_df, qe_df)
-    print("\n  ✓ 반응 타이밍 + QE 규모 분석 완료 (v8a)")
+    print("\n  ✓ 반응 타이밍 + QE 규모 분석 완료 (v8)")
     return {"timing": timing_df, "qe": qe_df, "combined": combined}
 
 

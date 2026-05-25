@@ -150,7 +150,7 @@ def add_rate_cycle_dummies(df):
 
 
 # ──────────────────────────────────────────────
-#  ★ v7 핵심: QVAR 기반 경기 국면 변수 생성
+#  (v8) QVAR 기반 경기 국면 변수 생성
 # ──────────────────────────────────────────────
 
 def add_qvar_regime_features(df):
@@ -167,7 +167,7 @@ def add_qvar_regime_features(df):
     중립기: Oil→CPI 지배적
     과열기: Oil→CPI, M2→CaseShiller 강함
     """
-    print("\n  [2-4] QVAR 기반 경기 국면 변수 생성 (★ v7 핵심)")
+    print("\n  [2-4] QVAR 기반 경기 국면 변수 생성")
     new_cols = {}
 
     # ────────────────────────────────────────
@@ -364,7 +364,7 @@ def build_features(df):
 # ──────────────────────────────────────────────
 
 def main():
-    print("\n[02] 전처리 (v7 Regime)")
+    print("\n[02] 전처리 (v8)")
 
     raw_path = os.path.join(C.DATA_RAW_DIR, "raw_data.csv")
     if not os.path.exists(raw_path):
@@ -377,7 +377,7 @@ def main():
     df = basic_preprocess(df)
     df = build_monetary_vars(df)
     df = add_rate_cycle_dummies(df)
-    df = add_qvar_regime_features(df)  # ★ v7 핵심
+    df = add_qvar_regime_features(df)  # (v8) 경기 국면 변수
     df = build_features(df)
 
     path = os.path.join(C.DATA_PROC_DIR, "processed_data.csv")
