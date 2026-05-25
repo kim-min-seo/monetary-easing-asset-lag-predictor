@@ -6,7 +6,7 @@
 #  [실행 전 패키지 설치]
 #  pip install python-dotenv fredapi yfinance pandas numpy
 #  pip install scikit-learn xgboost lightgbm shap
-#  pip install statsmodels scipy matplotlib seaborn plotly optuna
+#  pip install statsmodels scipy matplotlib seaborn plotly
 #
 #  [사용 예시]
 #  python main.py                  # 대화형 메뉴
