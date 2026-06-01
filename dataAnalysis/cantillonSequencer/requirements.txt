@@ -1,0 +1,10 @@
+# cantillon-sequencer 의존성
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+statsmodels>=0.14
+matplotlib>=3.7
+python-dotenv>=1.0
+fredapi>=0.5.1
+yfinance>=0.2.40
+pytest>=7.0
